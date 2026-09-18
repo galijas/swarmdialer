@@ -148,7 +148,8 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 		LocalIP: localIP,
 	}
 
-	tenantID := 1 // system level — used directly for non-Multi-Tenant editions
+	tenantID := 1            // system level — used directly for non-Multi-Tenant editions
+	extDigits := p.ExtLength // Multi-Tenant: our own free choice, set on the tenant below
 	if license.IsMultiTenant() {
 		progress.set(func() { progress.message = "ensuring tenant package exists" })
 		packageID, err := client.EnsureSwarmDialerPackage()
@@ -201,16 +202,49 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 		srv.TenantID = id
 		srv.TenantCode = p.TenantCode
 	} else {
-		progress.set(func() { progress.message = "non-Multi-Tenant edition — provisioning extensions at system level" })
+		progress.set(func() { progress.message = "detecting system extension number length" })
+		// Non-Multi-Tenant editions have one system-wide extension digit
+		// length we must detect and match, not choose ourselves — unlike
+		// Multi-Tenant, where it's a free per-tenant choice (ExtLength
+		// above). Guessing wrong here doesn't fail fast: every extension
+		// creation attempt gets rejected with the same permanent
+		// validation error, and AddExtensionWithRetry can't tell that
+		// apart from a transient one, so it burns the full retry window
+		// before finally surfacing it. Confirmed live (2026-09-18) against
+		// a system configured for 4-digit extensions.
+		digits, err := client.GetSystemExtensionLength()
+		if err != nil {
+			progress.set(func() { progress.done = true; progress.err = err.Error() })
+			return nil, fmt.Errorf("detecting system extension length: %w", err)
+		}
+		extDigits = digits
+		progress.set(func() {
+			progress.message = fmt.Sprintf("provisioning extensions at system level (%d-digit)", extDigits)
+		})
+	}
+
+	extBase := 1
+	for i := 1; i < extDigits; i++ {
+		extBase *= 10
 	}
 
 	extensions := make([]pbxware.ProvisionedExtension, 0, p.ExtensionCount)
-	for i := 0; i < p.ExtensionCount; i++ {
+	candidate := extBase
+	reservedSkips := 0
+	// A handful of collisions with pre-existing reserved extensions (e.g.
+	// a system's default Operator sitting at the digit base, like 1000 —
+	// confirmed live 2026-09-18) is expected and fine to just skip past.
+	// Far more than that suggests something structurally wrong (e.g. the
+	// whole range is already in use), so this still gives up rather than
+	// looping forever.
+	const maxReservedSkips = 20
+	for len(extensions) < p.ExtensionCount {
 		if ctx.Err() != nil {
 			progress.set(func() { progress.done = true; progress.err = ctx.Err().Error() })
 			return nil, ctx.Err()
 		}
-		extNum := 100 + i
+		extNum := candidate
+		candidate++
 		secret, err := pbxware.GenerateSecret()
 		if err != nil {
 			progress.set(func() { progress.done = true; progress.err = err.Error() })
@@ -229,6 +263,14 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 			AllowedCodecs: "ulaw:alaw",
 		}, p.MaxWait)
 		if err != nil {
+			if pbxware.IsReservedExtensionError(err) {
+				reservedSkips++
+				if reservedSkips > maxReservedSkips {
+					progress.set(func() { progress.done = true; progress.err = err.Error() })
+					return nil, fmt.Errorf("too many reserved-extension collisions from %d onward: %w", extBase, err)
+				}
+				continue // try the next number — this collision doesn't count against ExtensionCount
+			}
 			progress.set(func() { progress.done = true; progress.err = err.Error() })
 			return nil, fmt.Errorf("creating extension %d: %w", extNum, err)
 		}
@@ -245,9 +287,10 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 			Username:    cfg.Username,
 			Secret:      cfg.Secret,
 		})
+		created := len(extensions)
 		progress.set(func() {
-			progress.created = i + 1
-			progress.message = fmt.Sprintf("created extension %s (%d/%d)", cfg.Ext, i+1, p.ExtensionCount)
+			progress.created = created
+			progress.message = fmt.Sprintf("created extension %s (%d/%d)", cfg.Ext, created, p.ExtensionCount)
 		})
 	}
 

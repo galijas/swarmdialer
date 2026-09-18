@@ -4,21 +4,61 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 )
 
+// permanentExtensionErrors matches AddExtension error substrings that can
+// never succeed no matter how long we wait, so retrying them is pure
+// wasted time (up to the full maxWait) rather than a safety margin.
+// Confirmed live (2026-09-18): a chosen extension number colliding with a
+// pre-existing reserved one (e.g. a system's default Operator extension)
+// fails with "extension is reserved" on every single attempt, and
+// AddExtensionWithRetry burned the full 10-minute maxWait on it before
+// this existed, indistinguishable from a real transient failure.
+var permanentExtensionErrors = []string{
+	"is reserved",
+	"already exist",
+	"contains invalid data",
+}
+
+func isPermanentExtensionError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, s := range permanentExtensionErrors {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsReservedExtensionError reports whether err is specifically an
+// extension-number collision (already in use / reserved for something
+// else, e.g. a system's default Operator extension) — as opposed to some
+// other permanent error. Callers choosing extension numbers themselves
+// (see wizard.Provision) can use this to skip just that one number and
+// try the next, rather than aborting the whole run over one collision.
+func IsReservedExtensionError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "is reserved")
+}
+
 // AddExtensionWithRetry calls AddExtension, retrying with exponential backoff
-// until it succeeds or maxWait elapses.
+// until it succeeds, maxWait elapses, or the error is one we know can never
+// resolve itself (see permanentExtensionErrors) — failing those fast instead
+// of burning the full retry window matters here because the caller
+// (wizard.Provision) is placing one extension per loop iteration, and a
+// permanent error on extension N should surface immediately, not after N
+// has already blocked the whole run for minutes.
 //
-// It deliberately retries on ANY error rather than trying to whitelist known
-// "tenant not ready yet" error strings: empirically, a freshly created
-// tenant's not-ready state has produced at least four different error shapes
-// from PBXware ("Failed to generate configuration", "Table ... doesn't
-// exist", a raw HTML error page instead of JSON, "Unable to create
-// extension") and there's no reason to assume that list is complete. maxWait
-// bounds the cost of this: a genuinely permanent error (bad input, etc.)
-// still surfaces correctly once the deadline is hit, just slower than an
-// immediate failure would.
+// For everything else, it deliberately retries on ANY error rather than
+// trying to whitelist known "tenant not ready yet" error strings:
+// empirically, a freshly created tenant's not-ready state has produced at
+// least four different error shapes from PBXware ("Failed to generate
+// configuration", "Table ... doesn't exist", a raw HTML error page instead
+// of JSON, "Unable to create extension") and there's no reason to assume
+// that list is complete. maxWait bounds the cost of this: an unrecognized
+// permanent error (bad input, etc.) still surfaces correctly once the
+// deadline is hit, just slower than an immediate failure would.
 func (c *Client) AddExtensionWithRetry(p ExtensionParams, maxWait time.Duration) (ExtensionResult, error) {
 	delay := 5 * time.Second
 	const maxDelay = 60 * time.Second
@@ -28,6 +68,9 @@ func (c *Client) AddExtensionWithRetry(p ExtensionParams, maxWait time.Duration)
 		result, err := c.AddExtension(p)
 		if err == nil {
 			return result, nil
+		}
+		if isPermanentExtensionError(err) {
+			return ExtensionResult{}, fmt.Errorf("permanent error creating extension %s: %w", p.Ext, err)
 		}
 		if time.Now().Add(delay).After(deadline) {
 			return ExtensionResult{}, fmt.Errorf("gave up after %s waiting for tenant provisioning: %w", maxWait, err)

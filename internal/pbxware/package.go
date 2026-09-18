@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // SwarmDialerPackageName is the tenant package SwarmDialer creates (or
@@ -13,10 +14,17 @@ import (
 const SwarmDialerPackageName = "SwarmDialerPackage"
 
 // ListPackages returns every tenant package on the system, ID -> name, as
-// returned by pbxware.package.list.
+// returned by pbxware.package.list. A PBXware instance with zero packages
+// (e.g. a genuinely fresh Multi-Tenant install) returns an *error*
+// response ("No tenant packages present on system.") instead of an empty
+// list for this action — confirmed live against a fresh instance — so
+// that specific error is treated as zero packages, not a failure.
 func (c *Client) ListPackages() (map[int]string, error) {
 	body, err := c.call("pbxware.package.list", nil)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no tenant packages") {
+			return map[int]string{}, nil
+		}
 		return nil, err
 	}
 	out := make(map[int]string, len(body))

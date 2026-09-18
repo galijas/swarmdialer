@@ -159,6 +159,60 @@ Same arguments as Add, all optional except `server` and `id` (or `ext`, not both
 { "success": "Deleted Extension ID 10 successfully." }
 ```
 
+### ⚠️ Non-Multi-Tenant extension number length isn't a free choice — read it from `pbxware.server.configuration` (confirmed 2026-09-18)
+
+For Multi-Tenant editions, extension number length is a free per-tenant
+choice we make ourselves via `tenant.add`'s `ext_length` field (e.g. `3`
+digits, `100`-`999`). **Non-Multi-Tenant editions (e.g. Call Centre) have
+one system-wide length instead, and it's not something we choose — it has
+to be detected and matched.** Guessing wrong doesn't fail cleanly: every
+`ext.add` attempt is rejected with the same permanent validation error,
+e.g.
+```
+Required field 'ext=100' contains invalid data (Regex: /^\d{4}$/)
+```
+on every single attempt, indistinguishable by `AddExtensionWithRetry`
+from a transient "system still settling" error — so it burns the full
+retry window (up to 10 minutes) before finally surfacing.
+
+The digit length is the `numbering` field on `pbxware.server.configuration`
+(a system-level analog to `tenant.configuration`, used instead of it on
+non-tenant-mode instances — confirmed live: calling `tenant.configuration`
+on a Multi-Tenant instance's system scope, or `server.configuration` on a
+Multi-Tenant instance at all, both return `"Tenant mode enabled, please
+use action \"tenant\" object instead of \"server\""`, so the two action
+families are mutually exclusive based on whether Tenant Mode is on):
+```
+action=pbxware.server.configuration
+```
+```json
+{"server_name":"PBXware", ..., "numbering":"4", ...}
+```
+`pbxware.EnsureSwarmDialerPackage`'s sibling, `Client.GetSystemExtensionLength`,
+reads this and `wizard.Provision` uses it to compute the actual starting
+extension number for non-Multi-Tenant editions, instead of the
+Multi-Tenant-only assumption of starting at `100`.
+
+### ⚠️ The chosen starting extension number can collide with a reserved one (confirmed 2026-09-18)
+
+Even with the digit length right, the literal number chosen can still be
+taken — e.g. a system's default Operator extension sitting at the digit
+base (`1000` on a 4-digit system):
+```
+Error creating extension: ua_id: extension is reserved - number 1000 is reserved by (Extension) Operator
+```
+This is also a **permanent** error (retrying it can never succeed), and
+also indistinguishable from a transient one without checking the message.
+`pbxware.IsReservedExtensionError` matches it specifically; `wizard.Provision`
+skips just that number and tries the next one rather than aborting the
+whole run (a handful of skips is expected/harmless; more than ~20 in a row
+means something is more broadly wrong, e.g. the whole range is already in
+use, and it gives up rather than looping forever). Separately,
+`AddExtensionWithRetry` now also fails fast (no retry) on any error
+substring it recognizes as permanent (`is reserved`, `already exist`,
+`contains invalid data`) rather than burning the full retry window on
+something that can never resolve itself.
+
 ---
 
 ## Tenants (`action=pbxware.tenant.*`)
