@@ -1,0 +1,10 @@
+PROJECT_STATE.md
+
+# Go build artifacts
+/bin/
+swarmdialer
+*.exe
+
+# Provisioning output — contains SIP secrets
+extensions.json
+
