@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"swarmdialer/internal/orchestrator"
 	"swarmdialer/internal/pbxware"
 	"swarmdialer/internal/sipua"
+	"swarmdialer/internal/statusapi"
 )
 
 func main() {
@@ -29,6 +31,7 @@ func main() {
 		callDuration   = flag.Duration("call-duration", 30*time.Second, "how long to hold each call before hanging up")
 		regTimeout     = flag.Duration("register-timeout", 15*time.Second, "per-extension registration timeout")
 		dialTimeout    = flag.Duration("dial-timeout", 15*time.Second, "per-call dial timeout")
+		statusAddr     = flag.String("status-addr", ":8080", "address to serve live JSON status on at /api/status while the run is in progress; empty disables it")
 	)
 	flag.Parse()
 
@@ -57,6 +60,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	state := orchestrator.NewRunState(len(endpoints) / 2)
+	if *statusAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/api/status", statusapi.Handler(state))
+		srv := &http.Server{Addr: *statusAddr, Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("status server on %s stopped: %v", *statusAddr, err)
+			}
+		}()
+		defer srv.Close()
+		log.Printf("live status: http://%s/api/status", *statusAddr)
+	}
+
 	start := time.Now()
 	result, err := orchestrator.Run(ctx, orchestrator.Config{
 		DialDestination: dialDestination,
@@ -67,7 +84,7 @@ func main() {
 		CallDuration:     *callDuration,
 		RegisterTimeout:  *regTimeout,
 		DialTimeout:      *dialTimeout,
-	}, endpoints)
+	}, endpoints, state)
 	if err != nil {
 		log.Fatalf("orchestrator run failed: %v", err)
 	}

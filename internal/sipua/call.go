@@ -112,6 +112,13 @@ func NewPhone(ctx context.Context, localIP string, localPort int, ep Endpoint) (
 		if err := dialogServer.ReadBye(req, tx); err != nil {
 			if err := dialogClient.ReadBye(req, tx); err != nil {
 				log.Printf("sipua: %s: BYE for unknown dialog: %v", ep.AOR, err)
+				// Respond explicitly rather than staying silent — silence
+				// makes PBXware retransmit the BYE repeatedly (observed
+				// during rapid dev-loop testing that reused fixed ports
+				// across short-lived processes; not seen in normal
+				// long-running operation, but responding is correct
+				// regardless of why a dialog didn't match).
+				_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil))
 			}
 		}
 		// Stop the RTP stream for this call regardless of which cache

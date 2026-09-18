@@ -1,9 +1,12 @@
 # PBXware API Reference (for SwarmDialer)
 
 Extracted from `PBXware API.pdf` (Bicom Systems, dated "April 2026", 238 pages).
-This file only covers what SwarmDialer's provisioning module needs: auth, protocol,
-Extensions (add/edit/delete/list), and Tenants (add/edit/delete/list). For anything
-else, re-open the source PDF.
+This file covers what SwarmDialer needs: auth, protocol, Extensions
+(add/edit/delete/list), Tenants (add/edit/delete/list), License info, Trunks
+(add/edit/delete/list/providers), and DIDs (add/edit). For anything else,
+re-open the source PDF (`~/claude/PBXware API.pdf`; re-extract text with
+`pdftotext -layout` if you need to search it again — see PROJECT_STATE.md
+for that workflow).
 
 ## Protocol & Authentication
 
@@ -212,6 +215,174 @@ Also has a `status` field: `0`=Not Active, `1`=Active, `2`=Suspended.
 ```json
 { "success": "Deleted Tenant ID 19 successfully." }
 ```
+**Note (confirmed 2026-09-17)**: this call returns success but does **not**
+actually remove the tenant — verified by checking `tenant.list` afterward.
+Don't rely on it for cleanup.
+
+### ⚠️ Concurrent-channel limit — every tenant defaults to 8 (confirmed 2026-09-18)
+
+Every tenant, however created (via GUI or API, with or without explicit
+values passed at creation), defaults to an **8 concurrent local/remote
+channel cap** — confirmed by hitting a clean, reproducible wall in load
+testing (exactly the first 8 calls succeed, everything after fails with
+`603 Decline`), then verifying against `tenant.configuration` on multiple
+tenants. **Not a license restriction** — PBXware licenses only cap total
+system-wide channels (see License section below), not per-tenant.
+
+This is a real, fixable tenant setting — in the admin GUI: System level →
+Tenants → `<tenant>` → Advanced settings → Channels → Local/Remote
+channels. But the **API has a request/response field-name mismatch** that
+makes it very easy to get wrong:
+- **Reading** current values (`pbxware.tenant.configuration`) shows them as
+  `incominglimit`/`outgoinglimit`.
+- **Setting** them via `pbxware.tenant.add` or `pbxware.tenant.edit`
+  requires the differently-named `local_channels`/`remote_channels`
+  parameters instead. Sending `incominglimit`/`outgoinglimit` as request
+  params (an easy mistake — they appear in the docs, in a *different,
+  equally-plausible-looking* section covering `conch`/`quech`/`aach`/
+  `zapch` for conferences/queues/ring-groups/auto-attendants/DAHDI) is
+  **silently ignored** — no error, tenant just stays at 8.
+
+Working example (via `tenant.edit`):
+```
+action=pbxware.tenant.edit&server=1&id=<tenant_id>&local_channels=600&remote_channels=600
+```
+Also has the same slow-write-outlasts-HTTP-timeout behavior as
+`tenant.add` — retry and verify via a follow-up `tenant.configuration`
+read rather than trusting the immediate HTTP response. SwarmDialer's
+`pbxware.SetTenantChannelLimits` handles this (retry + verify) and is
+called automatically on every provisioning run, for both new and reused
+tenants.
+
+---
+
+## License
+
+### Info — `pbxware.license.info`
+**Arguments**: none.
+**Response**: system edition, version, and every licensed limit — use this
+to detect whether a connected PBXware instance is Multi-Tenant (tenant
+creation applies) or a different edition (skip tenant creation, provision
+extensions directly at the system level) and to validate wizard inputs
+against real license limits instead of just warning generically.
+```json
+{
+  "Edition": "Multi-Tenant",
+  "Version": "8.1 (a35a9165)",
+  "Channels": "512",
+  "DIDs": "9999",
+  "Extensions": "1999",
+  "Tenants": "999",
+  "VOIP Trunks": "20",
+  "PSTN Trunks": "20",
+  ...
+}
+```
+**Gap**: only the `"Multi-Tenant"` edition string is confirmed (this is
+what our test instance returns). The exact strings for "Business"/"Contact
+Centre" editions the user mentioned aren't documented anywhere we've
+found — treat anything other than `"Multi-Tenant"` (case-insensitive) as
+"skip tenant creation" as a safe default, rather than trying to match
+specific other edition names.
+
+---
+
+## Trunks
+
+### List — `pbxware.trunk.list`
+**Arguments**: `server` (filter by tenant; "does not apply in Tenant Mode"
+per the docs — behavior in Tenant Mode not yet verified live).
+**Response** — keyed by Trunk ID: `name`, `protocol`, `provider_id`,
+`provider_name`, `status` (`enabled`/`disabled`).
+
+### List Providers — `pbxware.trunk.providers`
+**Arguments**: `server`.
+**Response** — keyed by provider name, value `[provider_id, "pstn"|"voip"]`.
+**Generic SIP = provider ID `20`** (confirmed live against our instance,
+matches docs exactly — unlike UAD IDs, no reason to expect this one to
+drift per-install, but re-verify per target instance anyway since it's
+cheap).
+```json
+{ "Generic SIP": ["20", "voip"], "Generic Analog": ["12", "pstn"], ... }
+```
+
+### Add — `pbxware.trunk.add`
+**Arguments** (only fields relevant to a SwarmDialer-created SIP trunk
+between two PBXware instances — full list has ~50 fields for callerID/
+privacy/RPID/recording etc., all safely omittable):
+
+| Field | Required? | Notes |
+|---|---|---|
+| `server` | **Required** | Tenant/Server ID |
+| `name` | **Required** | Trunk name |
+| `provider_id` | **Required** | `20` for Generic SIP |
+| `type` | **Required** | `user`, `friend`, or `peer` |
+| `dtmfmode` | **Required** | `auto`, `inband`, `rfc2833`, `info`, `shortinfo` |
+| `status` | **Required** | `active` / `not active` |
+| `country`/`national`/`international` | **Required** | Same convention as tenants |
+| `emerg_trunk` | **Required** | Emergency trunk (yes/no) |
+| `host` | **Required** | **This side's** host |
+| `username` | **Required** | **This side's** auth username |
+| `secret` | **Required** | **This side's** auth secret |
+| `peer_host` | **Required** | **Other side's** host — the far PBXware instance's IP |
+| `peer_username` | **Required** | **Other side's** auth username |
+| `peer_secret` | **Required** | **Other side's** auth secret |
+| `insecure` | **Required** | `port`, `invite`, `port,invite`, or `very` |
+| `looserouting` | **Required** | `yes`/`no`/`1`/`0` |
+| `incominglimit`/`outgoinglimit` | **Required** | Trunk-level (not tenant-level — different from the tenant channel-limit gotcha above) |
+| `codecs` | **Required** | Colon-separated, e.g. `ulaw:alaw` |
+| `codecs_ptime` | **Required** | `10`, `20`, `30`... `300` |
+
+**To connect instance A ↔ instance B**: create a trunk on A with
+`host`=A's IP, `peer_host`=B's IP, and a shared `username`/`secret` pair
+that both sides agree on (generate once, use as both A's `username`/
+`secret` and B's `peer_username`/`peer_secret`, and vice versa — needs to
+be symmetric). Mirror with a second trunk on B pointing back at A.
+
+**Successful response**: `{ "success": "Trunk ID: 10", "id": 10 }`
+
+**Open question, not yet resolved**: how outbound calls actually get
+routed onto a specific trunk isn't fully clear from the docs alone.
+Extensions have `primary_trunk`/`secondary_trunk`/`tertiary_trunk` fields
+(seen in the Extensions field list) — this may be what "set as default
+trunk for the tenant" means in practice (per-extension, set on every
+extension in the tenant, rather than one tenant-wide switch). Verify this
+empirically against the real system when building this — don't guess
+further from docs alone, this system's docs have repeatedly not matched
+reality in edge cases (tenant_code range, secret complexity, this exact
+channel-limit field mismatch, etc.).
+
+### Edit / Delete — `pbxware.trunk.edit` / `pbxware.trunk.delete`
+Same shape as tenant edit/delete (edit: same args as add, optional except
+`server`+`id`; delete: `server`+`id`). Assume delete may have the same
+"returns success but doesn't actually delete" issue seen with tenants —
+verify before relying on it.
+
+---
+
+## DIDs
+
+### Add — `pbxware.did.add`
+**Arguments** (relevant subset — full list has ~25 optional fields for
+billing/CRM/recording etc.):
+
+| Field | Required? | Notes |
+|---|---|---|
+| `server` | **Required** | Tenant/Server ID |
+| `trunk` | **Required** | Trunk ID this DID is mapped to (inbound route) |
+| `did` | **Required** | The actual DID number |
+| `name` | optional | Display name |
+| `dest_type` | **Required** | `0` = Extension (what SwarmDialer needs); other values: Ring Group, IVR, Queue, External Number, etc. — see full enum in source PDF if ever needed |
+| `destination` | **Required** (for dest_type ≠ Phone Callback/Deny Access) | The target — **unclear from docs whether this should be the extension number or its internal ID; verify live when implementing** |
+| `disabled` | **Required** | `0` = enabled, `1` = disabled |
+
+**Successful response**: `{ "success": "DID ID: 1.", "id": 1 }`
+
+For SwarmDialer's remote-calling feature: create one DID per extension on
+the *receiving* instance, `trunk` = the trunk connecting back to the
+*calling* instance, `dest_type=0`, `destination`=that extension — giving a
+one-to-one DID↔extension mapping so a call placed to the DID over the
+trunk lands directly on the matching extension.
 
 ---
 

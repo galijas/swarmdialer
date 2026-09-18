@@ -31,6 +31,7 @@ func main() {
 		ua            = flag.Int("ua", 50, "User Agent Device ID (50 = Generic SIP)")
 		maxWait       = flag.Duration("max-wait", 10*time.Minute, "how long to keep retrying extension creation while a tenant finishes provisioning")
 		output        = flag.String("output", "extensions.json", "path to write the created extensions (with SIP credentials) as JSON")
+		channelLimit  = flag.Int("channel-limit", 600, "local/remote channel limit to set on the tenant (PBXware defaults every tenant to 8, far too low for load testing) — applied whether the tenant is newly created or reused")
 	)
 	flag.Parse()
 
@@ -68,6 +69,15 @@ func main() {
 	if err := client.WaitForTenant(server, *maxWait); err != nil {
 		log.Fatalf("tenant %d never showed up: %v", server, err)
 	}
+
+	// PBXware defaults every tenant to an 8 concurrent-channel cap
+	// regardless of package/license — always raise it, whether this tenant
+	// was just created or is being reused, since existing/GUI-created
+	// tenants default to 8 too. See SetTenantChannelLimits's doc comment.
+	if err := client.SetTenantChannelLimits(server, *channelLimit, *channelLimit, *maxWait); err != nil {
+		log.Fatalf("raising tenant %d's channel limit: %v", server, err)
+	}
+	log.Printf("tenant %d channel limit set to %d", server, *channelLimit)
 
 	var created []pbxware.ProvisionedExtension
 	for i := 0; i < *count; i++ {

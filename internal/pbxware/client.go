@@ -112,6 +112,84 @@ func (c *Client) AddTenant(p TenantParams) (int, error) {
 	return id, nil
 }
 
+// TenantChannelLimits is a tenant's current local/remote channel capacity,
+// as read back from pbxware.tenant.configuration.
+type TenantChannelLimits struct {
+	Local  int
+	Remote int
+}
+
+// GetTenantChannelLimits reads a tenant's current local/remote channel
+// limits — the incominglimit/outgoinglimit fields in tenant.configuration's
+// response (see SetTenantChannelLimits for why the request uses different
+// field names than the response).
+func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, error) {
+	body, err := c.call("pbxware.tenant.configuration", url.Values{"id": {strconv.Itoa(tenantID)}})
+	if err != nil {
+		return TenantChannelLimits{}, err
+	}
+	local, err := toInt(body["incominglimit"])
+	if err != nil {
+		return TenantChannelLimits{}, fmt.Errorf("reading incominglimit: %w", err)
+	}
+	remote, err := toInt(body["outgoinglimit"])
+	if err != nil {
+		return TenantChannelLimits{}, fmt.Errorf("reading outgoinglimit: %w", err)
+	}
+	return TenantChannelLimits{Local: local, Remote: remote}, nil
+}
+
+// SetTenantChannelLimits raises (or sets) a tenant's concurrent-channel
+// capacity. PBXware defaults every tenant to 8 concurrent local/remote
+// channels regardless of package or license — confirmed empirically: it's
+// not a license restriction (no per-tenant license limit exists; only a
+// system-wide total channel count is licensed) and not something settable
+// via tenant.add/edit's incominglimit/outgoinglimit fields (those are the
+// *response* field names in tenant.configuration; sending them as request
+// params is silently ignored — confirmed by testing, tenant stays at the 8
+// default). The request must use the differently-named
+// local_channels/remote_channels parameters instead. This is exactly the
+// setting under PBXware's admin GUI at System level → Tenants → <tenant> →
+// Advanced settings → Channels → Local/Remote channels.
+//
+// SwarmDialer needs this raised well above 8 for any load test beyond
+// trivial scale — call this as a standard step after WaitForTenant whenever
+// setting up or reusing a tenant for load testing, not just when creating a
+// brand-new one, since existing/GUI-created tenants default to 8 too.
+//
+// The underlying tenant.edit call follows the same slow-write pattern as
+// AddTenant (frequently outlasts the HTTP client's own timeout even when it
+// succeeds server-side), so this retries with backoff and verifies via
+// GetTenantChannelLimits rather than trusting the HTTP response alone.
+func (c *Client) SetTenantChannelLimits(tenantID, localChannels, remoteChannels int, maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	delay := 5 * time.Second
+	const maxDelay = 30 * time.Second
+
+	for {
+		_, editErr := c.call("pbxware.tenant.edit", url.Values{
+			"server":          {"1"},
+			"id":              {strconv.Itoa(tenantID)},
+			"local_channels":  {strconv.Itoa(localChannels)},
+			"remote_channels": {strconv.Itoa(remoteChannels)},
+		})
+
+		current, readErr := c.GetTenantChannelLimits(tenantID)
+		if readErr == nil && current.Local == localChannels && current.Remote == remoteChannels {
+			return nil
+		}
+
+		if time.Now().Add(delay).After(deadline) {
+			if editErr != nil {
+				return fmt.Errorf("gave up after %s waiting for channel limits to apply: %w", maxWait, editErr)
+			}
+			return fmt.Errorf("gave up after %s: tenant %d channel limits still not applied (currently local=%d remote=%d)", maxWait, tenantID, current.Local, current.Remote)
+		}
+		time.Sleep(delay)
+		delay = min(delay*2, maxDelay)
+	}
+}
+
 // Tenant is one entry from ListTenants.
 type Tenant struct {
 	ID   int

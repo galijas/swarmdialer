@@ -65,7 +65,17 @@ func (r *Result) Failed() int {
 // (0↔1, 2↔3, ...; an odd one out is skipped), places a call within each
 // pair, holds it for Config.CallDuration, then hangs up — all concurrently,
 // with each pair's call start staggered by RampInterval.
-func Run(ctx context.Context, cfg Config, endpoints []sipua.Endpoint) (*Result, error) {
+//
+// state receives live updates throughout the run (phase transitions, each
+// pair's status and running RTP counts) — pass the result of NewRunState
+// and read it concurrently (e.g. from an HTTP handler) to watch the run
+// progress instead of only seeing the final Result once everything
+// finishes. Pass nil if you only care about the final Result.
+func Run(ctx context.Context, cfg Config, endpoints []sipua.Endpoint, state *RunState) (*Result, error) {
+	if state == nil {
+		state = NewRunState(len(endpoints) / 2)
+	}
+
 	sipDomain := cfg.SIPDomain
 	if sipDomain == "" {
 		sipDomain = cfg.DialDestination
@@ -85,6 +95,7 @@ func Run(ctx context.Context, cfg Config, endpoints []sipua.Endpoint) (*Result, 
 		}
 	}()
 
+	state.setPhase(PhaseRegistering)
 	if err := registerAll(ctx, cfg, sipDomain, phones); err != nil {
 		return nil, err
 	}
@@ -97,6 +108,11 @@ func Run(ctx context.Context, cfg Config, endpoints []sipua.Endpoint) (*Result, 
 	pairs := makePairs(len(endpoints))
 	log.Printf("orchestrator: %d pairs to call, ramping %s apart", len(pairs), cfg.RampInterval)
 
+	for i, pair := range pairs {
+		state.initPair(i, endpoints[pair[0]].AOR, endpoints[pair[1]].AOR)
+	}
+	state.setPhase(PhaseCalling)
+
 	results := make([]PairResult, len(pairs))
 	var wg sync.WaitGroup
 	for i, pair := range pairs {
@@ -106,18 +122,25 @@ func Run(ctx context.Context, cfg Config, endpoints []sipua.Endpoint) (*Result, 
 			select {
 			case <-time.After(time.Duration(i) * cfg.RampInterval):
 			case <-ctx.Done():
+				err := ctx.Err()
+				state.updatePair(i, func(p *PairState) {
+					p.Status = StatusFailed
+					p.Err = err.Error()
+				})
 				results[i] = PairResult{
 					CallerAOR: endpoints[pair[0]].AOR,
 					CalleeAOR: endpoints[pair[1]].AOR,
-					Err:       ctx.Err(),
+					Err:       err,
 				}
 				return
 			}
-			results[i] = runOnePair(ctx, cfg, sipDomain, phones[pair[0]], endpoints[pair[0]].AOR, endpoints[pair[1]].AOR)
+			state.updatePair(i, func(p *PairState) { p.Status = StatusDialing })
+			results[i] = runOnePair(ctx, cfg, sipDomain, phones[pair[0]], endpoints[pair[0]].AOR, endpoints[pair[1]].AOR, i, state)
 		}(i, pair)
 	}
 	wg.Wait()
 
+	state.setPhase(PhaseDone)
 	return &Result{Pairs: results}, nil
 }
 
@@ -171,18 +194,37 @@ func makePairs(n int) [][2]int {
 	return pairs
 }
 
-func runOnePair(ctx context.Context, cfg Config, sipDomain string, caller *sipua.Phone, callerAOR, calleeAOR string) PairResult {
+func runOnePair(ctx context.Context, cfg Config, sipDomain string, caller *sipua.Phone, callerAOR, calleeAOR string, i int, state *RunState) PairResult {
 	dialCtx, cancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer cancel()
 
 	call, err := caller.Dial(dialCtx, cfg.DialDestination, sipDomain, calleeAOR)
 	if err != nil {
+		state.updatePair(i, func(p *PairState) {
+			p.Status = StatusFailed
+			p.Err = err.Error()
+		})
 		return PairResult{CallerAOR: callerAOR, CalleeAOR: calleeAOR, Err: fmt.Errorf("dialing: %w", err)}
 	}
+	state.updatePair(i, func(p *PairState) { p.Status = StatusAnswered })
 
-	select {
-	case <-ctx.Done():
-	case <-time.After(cfg.CallDuration):
+	// Update live RTP counts once a second while the call is held, so a
+	// status page shows media actually flowing rather than just a static
+	// "answered" state until the very end.
+	holdTicker := time.NewTicker(time.Second)
+	defer holdTicker.Stop()
+	deadline := time.After(cfg.CallDuration)
+holdLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			break holdLoop
+		case <-deadline:
+			break holdLoop
+		case <-holdTicker.C:
+			sent, recv := call.RTP.Stats()
+			state.updatePair(i, func(p *PairState) { p.RTPSent = sent; p.RTPRecv = recv })
+		}
 	}
 
 	sent, recv := call.RTP.Stats()
@@ -194,6 +236,12 @@ func runOnePair(ctx context.Context, cfg Config, sipDomain string, caller *sipua
 	if err := call.Hangup(byeCtx); err != nil {
 		log.Printf("orchestrator: %s->%s: hangup error: %v", callerAOR, calleeAOR, err)
 	}
+
+	state.updatePair(i, func(p *PairState) {
+		p.Status = StatusEnded
+		p.RTPSent = sent
+		p.RTPRecv = recv
+	})
 
 	return PairResult{CallerAOR: callerAOR, CalleeAOR: calleeAOR, Answered: true, RTPSent: sent, RTPRecv: recv}
 }
