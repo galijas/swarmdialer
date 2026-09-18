@@ -70,11 +70,13 @@ func main() {
 		log.Fatalf("tenant %d never showed up: %v", server, err)
 	}
 
-	// PBXware defaults every tenant to an 8 concurrent-channel cap
-	// regardless of package/license — always raise it, whether this tenant
-	// was just created or is being reused, since existing/GUI-created
-	// tenants default to 8 too. See SetTenantChannelLimits's doc comment.
-	if err := client.SetTenantChannelLimits(server, *channelLimit, *channelLimit, *maxWait); err != nil {
+	// PBXware defaults every tenant's channel-like resource pools (Local/
+	// Remote SIP channels, Conferences, Queues, Enhanced Ring Groups, Auto
+	// Attendants, DAHDI) to 8 each, independently, regardless of
+	// package/license — always raise them all, whether this tenant was
+	// just created or is being reused, since existing/GUI-created tenants
+	// default to 8 too. See SetTenantChannelLimits's doc comment.
+	if err := client.SetTenantChannelLimits(server, *channelLimit, *maxWait); err != nil {
 		log.Fatalf("raising tenant %d's channel limit: %v", server, err)
 	}
 	log.Printf("tenant %d channel limit set to %d", server, *channelLimit)

@@ -235,7 +235,12 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 	}
 
 	callDuration := time.Duration(req.CallDurationSeconds) * time.Second
-	const rampInterval = 200 * time.Millisecond
+	// 200ms was too aggressive at scale — a live GUI test with 200
+	// cumulative calls saw 168 "603 Decline" failures (see
+	// PROJECT_STATE.md's INVITE-burst-sensitivity finding). 800ms matches
+	// the last empirically-safe value found during small-scale testing;
+	// re-tune from real data as testing moves to higher call counts.
+	const rampInterval = 800 * time.Millisecond
 	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP)
 	writeJSON(w, http.StatusOK, map[string]int{"started": started})
 }

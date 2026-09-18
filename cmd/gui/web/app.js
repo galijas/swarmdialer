@@ -224,9 +224,11 @@ function confirmDial(section, count) {
 
 let currentSection = 'local';
 let ws = null;
+let wsReconnectTimer = null;
 
 function switchSection(section) {
   currentSection = section;
+  lastSeenEventSeq = 0; // local/remote sessions have independent event sequences
   connectStatusSocket();
 }
 
@@ -238,16 +240,24 @@ function setStatusView(view) {
 }
 
 function connectStatusSocket() {
-  if (ws) { ws.close(); ws = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws/status?section=${currentSection}`);
   ws.onmessage = (ev) => {
     const snap = JSON.parse(ev.data);
     renderSnapshot(snap);
   };
+  // Without this, a dropped connection (GUI server restart, network blip)
+  // leaves the dashboard silently frozen — stats/log/graphic all stop
+  // updating with no visible sign anything is wrong, since the one-off
+  // "N started" log line comes from the /api/dial response, not the socket.
+  ws.onclose = () => {
+    wsReconnectTimer = setTimeout(connectStatusSocket, 2000);
+  };
 }
 
-let knownCallIDs = new Set();
+let lastSeenEventSeq = 0;
 
 function renderSnapshot(snap) {
   document.getElementById('stat-active').textContent = (snap.active_calls || []).length;
@@ -256,18 +266,19 @@ function renderSnapshot(snap) {
   document.getElementById('stat-failed').textContent = snap.total_calls_failed || 0;
   document.getElementById('stat-rtp').textContent = (snap.total_rtp_sent || 0) + (snap.total_rtp_recv || 0);
 
-  // Log view: note newly-appeared calls.
-  const seen = new Set();
-  (snap.active_calls || []).forEach(c => {
-    seen.add(c.id);
-    if (!knownCallIDs.has(c.id)) {
-      logLine(`<span class="ok">answered</span> ${c.caller_aor} &rarr; ${c.callee_aor}`);
-    }
+  // Log view: one line per lifecycle event (dialing/answered/failed/ended),
+  // per extension pair — recent_events is a server-side ring buffer, we
+  // only log the ones newer than the last one we've already shown.
+  (snap.recent_events || []).forEach(ev => {
+    if (ev.seq <= lastSeenEventSeq) return;
+    lastSeenEventSeq = ev.seq;
+    const pair = `${ev.caller_aor} &rarr; ${ev.callee_aor}`;
+    if (ev.type === 'dialing') logLine(`dialing ${pair}`);
+    else if (ev.type === 'answered') logLine(`<span class="ok">answered</span> ${pair}`);
+    else if (ev.type === 'failed') logLine(`<span class="err">failed</span> ${pair} — ${ev.detail}`, true);
+    else if (ev.type === 'ended') logLine(`ended ${pair} (${ev.detail})`);
+    else if (ev.type === 'batch_done') logLine(`<strong>${ev.detail}</strong>`);
   });
-  knownCallIDs.forEach(id => {
-    if (!seen.has(id)) logLine(`call ${id} ended`);
-  });
-  knownCallIDs = seen;
 
   // Graphic view: one dot per active call, green if RTP flowing.
   const grid = document.getElementById('call-dot-grid');

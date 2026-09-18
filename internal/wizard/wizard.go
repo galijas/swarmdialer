@@ -97,9 +97,9 @@ func (p *ProvisionProgress) Snapshot() ProvisionProgressSnapshot {
 
 // ProvisionParams configures one server's provisioning step.
 type ProvisionParams struct {
-	Name          string // display name for this server
-	BaseURL       string
-	APIKey        string
+	Name           string // display name for this server
+	BaseURL        string
+	APIKey         string
 	ExtensionCount int
 	// Tenant creation fields — ignored (and tenant creation skipped) if
 	// the license's edition isn't Multi-Tenant.
@@ -183,7 +183,7 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 		}
 
 		progress.set(func() { progress.message = "raising tenant channel limit" })
-		if err := client.SetTenantChannelLimits(id, p.ChannelLimit, p.ChannelLimit, p.MaxWait); err != nil {
+		if err := client.SetTenantChannelLimits(id, p.ChannelLimit, p.MaxWait); err != nil {
 			progress.set(func() { progress.done = true; progress.err = err.Error() })
 			return nil, fmt.Errorf("raising channel limit: %w", err)
 		}
@@ -214,9 +214,9 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 			Email:         fmt.Sprintf("swarmdialer%d@swarmdialer.local", extNum),
 			Ext:           strconv.Itoa(extNum),
 			Secret:        secret,
-			UA:            50, // Generic SIP
-			IncomingLimit: 2,
-			OutgoingLimit: 2,
+			UA:            50,             // Generic SIP
+			IncomingLimit: p.ChannelLimit, // was hardcoded to 2 — capped every extension's own concurrency, not just the tenant's
+			OutgoingLimit: p.ChannelLimit,
 			AllowedCodecs: "ulaw:alaw",
 		}, p.MaxWait)
 		if err != nil {

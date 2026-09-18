@@ -61,6 +61,20 @@ func newPool(ctx context.Context, localIP string, basePort int, registerTimeout 
 		available[aor] = true
 	}
 
+	// A Session (unlike the old one-shot Run()) stays alive indefinitely —
+	// that's the whole point of the additive +N buttons. Without a refresh,
+	// every phone's REGISTER binding (300s below) silently expires and every
+	// subsequent call to/from it starts failing with 603 Decline, even
+	// though nothing else changed. Stagger the refreshes the same way the
+	// initial registration was staggered, to avoid re-creating the exact
+	// REGISTER-burst problem registerPhonesStaggered exists to avoid.
+	const registerExpiry = 300
+	const refreshStagger = 20 * time.Millisecond
+	refreshInterval := time.Duration(float64(registerExpiry)*0.8) * time.Second
+	for i, aor := range order {
+		go keepPhoneRegistered(ctx, phones[aor], dialDestination, sipDomain, registerTimeout, registerExpiry, refreshInterval+time.Duration(i)*refreshStagger)
+	}
+
 	return &pool{phones: phones, available: available, dialDestination: dialDestination, sipDomain: sipDomain}, nil
 }
 
@@ -104,6 +118,27 @@ func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDes
 	return nil
 }
 
+// keepPhoneRegistered re-registers phone every ~80% of expiry until ctx is
+// canceled, first waiting firstDelay (see newPool — staggered so many
+// phones don't all refresh in the same instant).
+func keepPhoneRegistered(ctx context.Context, phone *sipua.Phone, dialDestination, sipDomain string, registerTimeout time.Duration, expiry int, firstDelay time.Duration) {
+	delay := firstDelay
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		regCtx, cancel := context.WithTimeout(ctx, registerTimeout)
+		_, err := phone.Register(regCtx, dialDestination, sipDomain, expiry)
+		cancel()
+		if err != nil {
+			log.Printf("session: re-registering %s failed: %v", phone.Endpoint.AOR, err)
+		}
+		delay = time.Duration(float64(expiry)*0.8) * time.Second
+	}
+}
+
 // activeCall is one ongoing call tracked internally by a Session.
 type activeCall struct {
 	id                   string
@@ -111,6 +146,22 @@ type activeCall struct {
 	call                 *sipua.Call
 	startedAt            time.Time
 }
+
+// Event is one point-in-time occurrence in a call's lifecycle (dialing,
+// answered, failed, ended), for the dashboard's live-status log — plain
+// aggregate counters don't say *which* extensions did what, which is what
+// makes the log useful for spotting a pattern like a specific extension
+// always failing, or a burst of near-simultaneous 603s.
+type Event struct {
+	Seq       uint64    `json:"seq"`
+	Time      time.Time `json:"time"`
+	Type      string    `json:"type"` // "dialing", "answered", "failed", "ended"
+	CallerAOR string    `json:"caller_aor"`
+	CalleeAOR string    `json:"callee_aor"`
+	Detail    string    `json:"detail,omitempty"` // e.g. the dial error for "failed"
+}
+
+const maxRecentEvents = 200
 
 // CallInfo is a point-in-time, serializable view of one active call.
 type CallInfo struct {
@@ -133,6 +184,7 @@ type SessionSnapshot struct {
 	TotalCallsFailed    uint64     `json:"total_calls_failed"`
 	TotalRTPSent        uint64     `json:"total_rtp_sent"` // cumulative, includes ended calls
 	TotalRTPRecv        uint64     `json:"total_rtp_recv"`
+	RecentEvents        []Event    `json:"recent_events"` // last maxRecentEvents lifecycle events, oldest first
 }
 
 // Session is a persistent pool of registered, auto-answering extensions
@@ -158,7 +210,9 @@ type Session struct {
 	// for a remote Session it looks up that extension's DID.
 	dialNumberFor func(calleeAOR string) string
 	calls         map[string]*activeCall
+	events        []Event
 
+	nextEventSeq       atomic.Uint64
 	nextCallID         atomic.Uint64
 	totalCallsStarted  atomic.Uint64
 	totalCallsAnswered atomic.Uint64
@@ -235,19 +289,41 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 // extensions to the pool after callDuration.
 func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, sendMedia bool) (started int) {
 	pairs := s.reservePairs(n)
+	if len(pairs) == 0 {
+		return 0
+	}
+
+	var wg sync.WaitGroup
+	var batchAnswered, batchFailed atomic.Uint64
+	wg.Add(len(pairs))
 	for i, pair := range pairs {
 		s.totalCallsStarted.Add(1)
 		go func(i int, caller, callee string) {
+			defer wg.Done()
 			select {
 			case <-time.After(time.Duration(i) * rampInterval):
 			case <-s.ctx.Done():
 				s.release(caller, callee)
 				s.totalCallsFailed.Add(1)
+				batchFailed.Add(1)
 				return
 			}
-			s.runCall(caller, callee, callDuration, sendMedia)
+			if s.runCall(caller, callee, callDuration, sendMedia) {
+				batchAnswered.Add(1)
+			} else {
+				batchFailed.Add(1)
+			}
 		}(i, pair[0], pair[1])
 	}
+
+	go func() {
+		wg.Wait()
+		s.logEvent("batch_done", "", "", fmt.Sprintf(
+			"+%d batch: %d/%d calls answered, %d failed",
+			n, batchAnswered.Load(), len(pairs), batchFailed.Load(),
+		))
+	}()
+
 	return len(pairs)
 }
 
@@ -309,6 +385,21 @@ func freeList(available map[string]bool) []string {
 	return free
 }
 
+// logEvent records one call-lifecycle event for the live-status log,
+// keeping only the last maxRecentEvents.
+func (s *Session) logEvent(typ, callerAOR, calleeAOR, detail string) {
+	ev := Event{
+		Seq: s.nextEventSeq.Add(1), Time: time.Now(), Type: typ,
+		CallerAOR: callerAOR, CalleeAOR: calleeAOR, Detail: detail,
+	}
+	s.mu.Lock()
+	s.events = append(s.events, ev)
+	if len(s.events) > maxRecentEvents {
+		s.events = s.events[len(s.events)-maxRecentEvents:]
+	}
+	s.mu.Unlock()
+}
+
 func (s *Session) release(caller, callee string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -316,7 +407,9 @@ func (s *Session) release(caller, callee string) {
 	s.calleePool.available[callee] = true
 }
 
-func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool) {
+// runCall places one call and blocks until it ends, returning whether it
+// was answered (for the caller's batch-completion tally — see AddCalls).
+func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool) bool {
 	s.mu.Lock()
 	caller := s.callerPool.phones[callerAOR]
 	dialDestination, sipDomain := s.callerPool.dialDestination, s.callerPool.sipDomain
@@ -326,14 +419,17 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	}
 	s.mu.Unlock()
 
+	s.logEvent("dialing", callerAOR, calleeAOR, "")
 	call, err := caller.Dial(s.ctx, s.dialTimeout, dialDestination, sipDomain, dialNumber, sendMedia)
 	if err != nil {
 		log.Printf("session: %s -> %s (dialing %s): dial failed: %v", callerAOR, calleeAOR, dialNumber, err)
+		s.logEvent("failed", callerAOR, calleeAOR, err.Error())
 		s.totalCallsFailed.Add(1)
 		s.release(callerAOR, calleeAOR)
-		return
+		return false
 	}
 	s.totalCallsAnswered.Add(1)
+	s.logEvent("answered", callerAOR, calleeAOR, "")
 
 	id := fmt.Sprintf("%d", s.nextCallID.Add(1))
 	ac := &activeCall{id: id, callerAOR: callerAOR, calleeAOR: calleeAOR, call: call, startedAt: time.Now()}
@@ -356,11 +452,13 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 
 	s.totalRTPSentEnded.Add(sent)
 	s.totalRTPRecvEnded.Add(recv)
+	s.logEvent("ended", callerAOR, calleeAOR, fmt.Sprintf("rtp sent=%d recv=%d", sent, recv))
 
 	s.mu.Lock()
 	delete(s.calls, id)
 	s.mu.Unlock()
 	s.release(callerAOR, calleeAOR)
+	return true
 }
 
 // Snapshot returns a point-in-time, serializable view of the session.
@@ -391,6 +489,9 @@ func (s *Session) Snapshot() SessionSnapshot {
 		})
 	}
 
+	events := make([]Event, len(s.events))
+	copy(events, s.events)
+
 	return SessionSnapshot{
 		TotalExtensions:     totalExt,
 		AvailableExtensions: avail,
@@ -400,6 +501,7 @@ func (s *Session) Snapshot() SessionSnapshot {
 		TotalCallsFailed:    s.totalCallsFailed.Load(),
 		TotalRTPSent:        s.totalRTPSentEnded.Load() + liveSent,
 		TotalRTPRecv:        s.totalRTPRecvEnded.Load() + liveRecv,
+		RecentEvents:        events,
 	}
 }
 

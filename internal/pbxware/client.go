@@ -112,70 +112,114 @@ func (c *Client) AddTenant(p TenantParams) (int, error) {
 	return id, nil
 }
 
-// TenantChannelLimits is a tenant's current local/remote channel capacity,
-// as read back from pbxware.tenant.configuration.
+// TenantChannelLimits is a tenant's current concurrent-resource capacity,
+// as read back from pbxware.tenant.configuration. PBXware tracks these as
+// separate, independently-defaulted pools — Local/Remote SIP channels are
+// only one of them. Confirmed empirically (2026-09-18): a tenant with
+// Local/Remote channels correctly raised to 600 still hit a hard wall at 8
+// concurrent local extension-to-extension calls, because Conferences,
+// Queues, Enhanced Ring Groups, and DAHDI *also* independently default to
+// 8 and PBXware's local-dialing AGI is gated by (or otherwise touches) one
+// or more of them even for a plain two-extension call with none of those
+// features involved. Auto Attendants defaults to a low value too and was
+// raised for the same reason, even though its cause wasn't isolated as
+// precisely. All five must be raised together, not just Local/Remote.
 type TenantChannelLimits struct {
-	Local  int
-	Remote int
+	Local              int
+	Remote             int
+	Conferences        int
+	Queues             int
+	EnhancedRingGroups int
+	AutoAttendants     int
+	DAHDI              int
 }
 
-// GetTenantChannelLimits reads a tenant's current local/remote channel
-// limits — the incominglimit/outgoinglimit fields in tenant.configuration's
-// response (see SetTenantChannelLimits for why the request uses different
-// field names than the response).
+// GetTenantChannelLimits reads a tenant's current channel-like limits — see
+// SetTenantChannelLimits for the request/response field-name mismatches
+// (only Auto Attendants' request and response names happen to match).
 func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, error) {
 	body, err := c.call("pbxware.tenant.configuration", url.Values{"id": {strconv.Itoa(tenantID)}})
 	if err != nil {
 		return TenantChannelLimits{}, err
 	}
-	local, err := toInt(body["incominglimit"])
-	if err != nil {
-		return TenantChannelLimits{}, fmt.Errorf("reading incominglimit: %w", err)
+	fields := map[string]*int{}
+	limits := TenantChannelLimits{}
+	fields["incominglimit"] = &limits.Local
+	fields["outgoinglimit"] = &limits.Remote
+	fields["conch"] = &limits.Conferences
+	fields["quech"] = &limits.Queues
+	fields["ergch"] = &limits.EnhancedRingGroups
+	fields["aach"] = &limits.AutoAttendants
+	fields["zapch"] = &limits.DAHDI
+	for respField, dst := range fields {
+		v, err := toInt(body[respField])
+		if err != nil {
+			return TenantChannelLimits{}, fmt.Errorf("reading %s: %w", respField, err)
+		}
+		*dst = v
 	}
-	remote, err := toInt(body["outgoinglimit"])
-	if err != nil {
-		return TenantChannelLimits{}, fmt.Errorf("reading outgoinglimit: %w", err)
-	}
-	return TenantChannelLimits{Local: local, Remote: remote}, nil
+	return limits, nil
 }
 
-// SetTenantChannelLimits raises (or sets) a tenant's concurrent-channel
-// capacity. PBXware defaults every tenant to 8 concurrent local/remote
-// channels regardless of package or license — confirmed empirically: it's
-// not a license restriction (no per-tenant license limit exists; only a
-// system-wide total channel count is licensed) and not something settable
-// via tenant.add/edit's incominglimit/outgoinglimit fields (those are the
-// *response* field names in tenant.configuration; sending them as request
-// params is silently ignored — confirmed by testing, tenant stays at the 8
-// default). The request must use the differently-named
-// local_channels/remote_channels parameters instead. This is exactly the
-// setting under PBXware's admin GUI at System level → Tenants → <tenant> →
-// Advanced settings → Channels → Local/Remote channels.
+// SetTenantChannelLimits raises (or sets) every one of a tenant's
+// channel-like concurrency pools to the same limit — Local/Remote SIP
+// channels, Conferences, Queues, Enhanced Ring Groups, Auto Attendants,
+// and DAHDI (see TenantChannelLimits). PBXware defaults every one of these
+// to 8 independently, regardless of package or license (no per-tenant
+// license limit exists; only a system-wide total channel count is
+// licensed), and none of them are settable by sending back the response
+// field name as a request param (e.g. incominglimit/outgoinglimit,
+// conch/quech/ergch/zapch as request params are silently ignored — only
+// aach happens to double as its own request param name). The request must
+// use these differently-named parameters instead:
 //
-// SwarmDialer needs this raised well above 8 for any load test beyond
-// trivial scale — call this as a standard step after WaitForTenant whenever
-// setting up or reusing a tenant for load testing, not just when creating a
-// brand-new one, since existing/GUI-created tenants default to 8 too.
+//	response field -> request param
+//	incominglimit   -> local_channels
+//	outgoinglimit   -> remote_channels
+//	conch           -> conferences
+//	quech           -> queues
+//	ergch           -> enhanced_ring_groups
+//	aach            -> aach
+//	zapch           -> dahdi
+//
+// This is exactly the settings under PBXware's admin GUI at System level →
+// Tenants → <tenant> → Advanced settings → Channels.
+//
+// SwarmDialer needs all of these raised well above 8 for any load test
+// beyond trivial scale — call this as a standard step after WaitForTenant
+// whenever setting up or reusing a tenant for load testing, not just when
+// creating a brand-new one, since existing/GUI-created tenants default to
+// 8 too.
 //
 // The underlying tenant.edit call follows the same slow-write pattern as
 // AddTenant (frequently outlasts the HTTP client's own timeout even when it
 // succeeds server-side), so this retries with backoff and verifies via
 // GetTenantChannelLimits rather than trusting the HTTP response alone.
-func (c *Client) SetTenantChannelLimits(tenantID, localChannels, remoteChannels int, maxWait time.Duration) error {
+func (c *Client) SetTenantChannelLimits(tenantID, limit int, maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	delay := 5 * time.Second
 	const maxDelay = 30 * time.Second
 
+	matches := func(l TenantChannelLimits) bool {
+		return l.Local == limit && l.Remote == limit && l.Conferences == limit &&
+			l.Queues == limit && l.EnhancedRingGroups == limit && l.AutoAttendants == limit && l.DAHDI == limit
+	}
+
 	for {
 		_, editErr := c.call("pbxware.tenant.edit", url.Values{
-			"server":          {"1"},
-			"id":              {strconv.Itoa(tenantID)},
-			"local_channels":  {strconv.Itoa(localChannels)},
-			"remote_channels": {strconv.Itoa(remoteChannels)},
+			"server":               {"1"},
+			"id":                   {strconv.Itoa(tenantID)},
+			"local_channels":       {strconv.Itoa(limit)},
+			"remote_channels":      {strconv.Itoa(limit)},
+			"conferences":          {strconv.Itoa(limit)},
+			"queues":               {strconv.Itoa(limit)},
+			"enhanced_ring_groups": {strconv.Itoa(limit)},
+			"aach":                 {strconv.Itoa(limit)},
+			"dahdi":                {strconv.Itoa(limit)},
 		})
 
 		current, readErr := c.GetTenantChannelLimits(tenantID)
-		if readErr == nil && current.Local == localChannels && current.Remote == remoteChannels {
+		if readErr == nil && matches(current) {
 			return nil
 		}
 
@@ -183,7 +227,7 @@ func (c *Client) SetTenantChannelLimits(tenantID, localChannels, remoteChannels 
 			if editErr != nil {
 				return fmt.Errorf("gave up after %s waiting for channel limits to apply: %w", maxWait, editErr)
 			}
-			return fmt.Errorf("gave up after %s: tenant %d channel limits still not applied (currently local=%d remote=%d)", maxWait, tenantID, current.Local, current.Remote)
+			return fmt.Errorf("gave up after %s: tenant %d channel limits still not fully applied (currently %+v)", maxWait, tenantID, current)
 		}
 		time.Sleep(delay)
 		delay = min(delay*2, maxDelay)
@@ -224,15 +268,15 @@ func (c *Client) ListTenants() ([]Tenant, error) {
 
 // ExtensionParams holds the fields needed to create an extension.
 type ExtensionParams struct {
-	Server         int    // Tenant/Server ID
-	Name           string // Full name
-	Email          string
-	Ext            string // extension number; leave empty to let PBXware assign one, if supported
-	Secret         string // SIP password; must satisfy PBXware's complexity rule (see GenerateSecret)
-	UA             int    // User Agent Device ID; 50 = Generic SIP on the instances we've tested
-	IncomingLimit  int
-	OutgoingLimit  int
-	AllowedCodecs  string // colon-separated, e.g. "ulaw:alaw"
+	Server        int    // Tenant/Server ID
+	Name          string // Full name
+	Email         string
+	Ext           string // extension number; leave empty to let PBXware assign one, if supported
+	Secret        string // SIP password; must satisfy PBXware's complexity rule (see GenerateSecret)
+	UA            int    // User Agent Device ID; 50 = Generic SIP on the instances we've tested
+	IncomingLimit int
+	OutgoingLimit int
+	AllowedCodecs string // colon-separated, e.g. "ulaw:alaw"
 }
 
 // ExtensionResult is what AddExtension returns on success.

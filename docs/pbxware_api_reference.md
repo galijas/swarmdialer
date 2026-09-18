@@ -219,40 +219,74 @@ Also has a `status` field: `0`=Not Active, `1`=Active, `2`=Suspended.
 actually remove the tenant — verified by checking `tenant.list` afterward.
 Don't rely on it for cleanup.
 
-### ⚠️ Concurrent-channel limit — every tenant defaults to 8 (confirmed 2026-09-18)
+### ⚠️ Concurrent-channel limit — every tenant defaults to 8, on FIVE separate settings, not just Local/Remote (confirmed 2026-09-18)
 
 Every tenant, however created (via GUI or API, with or without explicit
-values passed at creation), defaults to an **8 concurrent local/remote
-channel cap** — confirmed by hitting a clean, reproducible wall in load
-testing (exactly the first 8 calls succeed, everything after fails with
-`603 Decline`), then verifying against `tenant.configuration` on multiple
-tenants. **Not a license restriction** — PBXware licenses only cap total
-system-wide channels (see License section below), not per-tenant.
+values passed at creation), defaults to an **8 concurrent cap on each of
+five separate resource pools**, independently: Local/Remote SIP channels,
+Conferences, Queues, Enhanced Ring Groups, and DAHDI (Auto Attendants also
+defaults low and should be raised for the same reason, though its specific
+effect wasn't isolated as precisely as the other four). **Not a license
+restriction** — PBXware licenses only cap total system-wide channels (see
+License section below), not per-tenant.
+
+**The trap**: raising only Local/Remote channels (`incominglimit`/
+`outgoinglimit`, see below) looks like it fixes concurrency, but a plain
+same-tenant extension-to-extension call still hits a hard wall at exactly
+8 concurrent calls (confirmed live via Asterisk's own `core show channels
+count`: sustained at 16 channels = 8 calls, immovable, until the other
+settings were also raised — then it climbed straight through, no ceiling).
+Root cause traced to `agi_dial_local.php` (PBXware's local-dialing AGI,
+launched via the FastAGI daemon at `127.0.0.1:4573`) issuing a near-instant
+hangup (`AST hangup cause 0`) on declined calls — the file is encoded
+(Bicomsystems' own commercial PHP loader), so the exact internal check
+couldn't be read directly, only inferred from this exhaustive elimination:
+tenant Local/Remote channels, system-level (`id=1`) channels, per-extension
+`incominglimit`/`outgoinglimit`, the full `license.info` response, and
+Asterisk's own global settings (`core show settings`: Maxcalls 512) were
+all checked and ruled out one at a time before landing on Conferences/
+Queues/Enhanced Ring Groups/DAHDI as the actual fix. Even though the call
+being tested doesn't use conferences, queues, ring groups, or DAHDI at
+all — this AGI is apparently gated by (or shares some resource-check code
+path with) all of them regardless.
 
 This is a real, fixable tenant setting — in the admin GUI: System level →
-Tenants → `<tenant>` → Advanced settings → Channels → Local/Remote
-channels. But the **API has a request/response field-name mismatch** that
-makes it very easy to get wrong:
-- **Reading** current values (`pbxware.tenant.configuration`) shows them as
-  `incominglimit`/`outgoinglimit`.
-- **Setting** them via `pbxware.tenant.add` or `pbxware.tenant.edit`
-  requires the differently-named `local_channels`/`remote_channels`
-  parameters instead. Sending `incominglimit`/`outgoinglimit` as request
-  params (an easy mistake — they appear in the docs, in a *different,
-  equally-plausible-looking* section covering `conch`/`quech`/`aach`/
-  `zapch` for conferences/queues/ring-groups/auto-attendants/DAHDI) is
-  **silently ignored** — no error, tenant just stays at 8.
+Tenants → `<tenant>` → Advanced settings → Channels (all five settings live
+together there). But the **API has a request/response field-name
+mismatch** on every one of them, and it's a *different* mismatch per field
+(most maddening: sending back the same name that was just read is silently
+ignored — no error, the tenant just stays at 8):
 
-Working example (via `tenant.edit`):
+| Response field (`tenant.configuration`) | Request param (`tenant.add`/`tenant.edit`) | Meaning |
+|---|---|---|
+| `incominglimit` | `local_channels` | Local SIP channels |
+| `outgoinglimit` | `remote_channels` | Remote SIP channels |
+| `conch` | `conferences` | Conference channels |
+| `quech` | `queues` | Queue channels |
+| `ergch` | `enhanced_ring_groups` | Enhanced Ring Group channels |
+| `aach` | `aach` | Auto Attendant channels (only one where request = response name) |
+| `zapch` | `dahdi` | DAHDI channels (legacy "Zap" naming survives only in the response field) |
+
+These request-param names were found empirically (systematic guess-and-
+verify against a live tenant, since the actual admin-GUI form and API
+handler source are both encoded) — they aren't documented anywhere else
+we've found.
+
+Working example (via `tenant.edit`, raising every one of the five/six to
+the same value):
 ```
-action=pbxware.tenant.edit&server=1&id=<tenant_id>&local_channels=600&remote_channels=600
+action=pbxware.tenant.edit&server=1&id=<tenant_id>&local_channels=600&remote_channels=600&conferences=600&queues=600&enhanced_ring_groups=600&aach=600&dahdi=600
 ```
 Also has the same slow-write-outlasts-HTTP-timeout behavior as
 `tenant.add` — retry and verify via a follow-up `tenant.configuration`
 read rather than trusting the immediate HTTP response. SwarmDialer's
-`pbxware.SetTenantChannelLimits` handles this (retry + verify) and is
-called automatically on every provisioning run, for both new and reused
-tenants.
+`pbxware.SetTenantChannelLimits` handles this (retry + verify all seven
+fields) and is called automatically on every provisioning run, for both
+new and reused tenants — **fixed 2026-09-18** to cover all of these, not
+just Local/Remote (the original version of this function only raised
+Local/Remote channels, which is exactly what let this 8-call ceiling slip
+through undetected until real load testing at ~25 concurrent calls
+surfaced it).
 
 ---
 

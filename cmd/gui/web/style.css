@@ -194,6 +194,8 @@ button.btn.secondary {
 
 #call-log .row { padding: 2px 0; }
 #call-log .row .ok { color: #4ade80; }
+#call-log .row .err { color: var(--danger); }
+#call-log .row.error { color: var(--danger); }
 
 #call-graphic {
   height: 260px;
