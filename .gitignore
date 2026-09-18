@@ -1,10 +1,12 @@
 PROJECT_STATE.md
 
-# Go build artifacts
+# Go build artifacts (binaries are always built into bin/ — see how the
+# project is built in PROJECT_STATE.md. A bare "swarmdialer" pattern here
+# previously also matched the cmd/swarmdialer/ SOURCE directory and kept it
+# out of git entirely since the first commit — fixed by scoping to /bin/ only.)
 /bin/
-swarmdialer
 *.exe
 
-# Provisioning output — contains SIP secrets
-extensions.json
+# Provisioning/load-test output — contains SIP secrets
+extensions*.json
 

@@ -4,10 +4,34 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
 )
+
+// dialogSession is the subset of *sipgo.DialogClientSession and
+// *sipgo.DialogServerSession that Call needs — just enough to hang up.
+type dialogSession interface {
+	Bye(ctx context.Context) error
+}
+
+// Call bundles one established call's SIP dialog and its RTP media session,
+// so both get torn down together.
+type Call struct {
+	session dialogSession
+	RTP     *RTPSession
+
+	phone  *Phone
+	callID string
+}
+
+// Hangup sends BYE and stops the RTP stream together.
+func (c *Call) Hangup(ctx context.Context) error {
+	c.RTP.Stop()
+	c.phone.calls.Delete(c.callID)
+	return c.session.Bye(ctx)
+}
 
 // Phone is one simulated PBXware extension: it can register, place outbound
 // calls, and auto-answer inbound calls, all bound to one local UDP port (its
@@ -22,6 +46,13 @@ type Phone struct {
 	Endpoint     Endpoint
 	LocalIP      string
 	LocalPort    int
+
+	// calls maps Call-ID -> *RTPSession for calls currently active on this
+	// phone, so the OnBye handler (which only sees a *sip.Request, not our
+	// Call struct) can stop the right RTP stream when the other party hangs
+	// up. Keyed by plain Call-ID rather than sipgo's computed dialog ID to
+	// stay independent of UAC/UAS tag-ordering details.
+	calls sync.Map
 }
 
 // NewPhone sets up a Phone listening on localIP:localPort and starts serving
@@ -78,11 +109,17 @@ func NewPhone(ctx context.Context, localIP string, localPort int, ep Endpoint) (
 	server.OnBye(func(req *sip.Request, tx sip.ServerTransaction) {
 		// This phone may be either side of the dialog being torn down
 		// (it placed the call, or it received it) — try both caches.
-		if err := dialogServer.ReadBye(req, tx); err == nil {
-			return
+		if err := dialogServer.ReadBye(req, tx); err != nil {
+			if err := dialogClient.ReadBye(req, tx); err != nil {
+				log.Printf("sipua: %s: BYE for unknown dialog: %v", ep.AOR, err)
+			}
 		}
-		if err := dialogClient.ReadBye(req, tx); err != nil {
-			log.Printf("sipua: %s: BYE for unknown dialog: %v", ep.AOR, err)
+		// Stop the RTP stream for this call regardless of which cache
+		// matched — the other party hanging up ends our media too.
+		if callID := req.CallID(); callID != nil {
+			if v, ok := p.calls.LoadAndDelete(callID.Value()); ok {
+				v.(*RTPSession).Stop()
+			}
 		}
 	})
 
@@ -111,10 +148,10 @@ func (p *Phone) Register(ctx context.Context, dialDestination, sipDomain string,
 	return Register(ctx, p.Client, dialDestination, sipDomain, localContact, p.Endpoint, expirySeconds)
 }
 
-// AutoAnswer makes this phone accept every inbound INVITE, answering with an
-// SDP offering G.711 on rtpPort. hangupAfterAnswer, if non-zero, sends BYE
-// that many seconds after answering (0 means: let the caller hang up).
-func (p *Phone) AutoAnswer(rtpPort int) {
+// AutoAnswer makes this phone accept every inbound INVITE: answer with an
+// SDP offering G.711, learn the caller's RTP address from their offer, and
+// start exchanging silence-payload RTP for the call's duration.
+func (p *Phone) AutoAnswer(ctx context.Context) {
 	p.Server.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		dlg, err := p.DialogServer.ReadInvite(req, tx)
 		if err != nil {
@@ -129,29 +166,60 @@ func (p *Phone) AutoAnswer(rtpPort int) {
 			log.Printf("sipua: %s: responding 180: %v", p.Endpoint.AOR, err)
 			return
 		}
-		sdp := buildSDP(p.LocalIP, rtpPort)
-		if err := dlg.RespondSDP(sdp); err != nil {
-			log.Printf("sipua: %s: responding 200 with SDP: %v", p.Endpoint.AOR, err)
+
+		remoteIP, remotePort, err := parseSDPMedia(req.Body())
+		if err != nil {
+			log.Printf("sipua: %s: parsing caller's SDP offer: %v", p.Endpoint.AOR, err)
 			return
 		}
-		log.Printf("sipua: %s: answered call from %s", p.Endpoint.AOR, req.From().Address.User)
+
+		rtpSession, err := NewRTPSession(0)
+		if err != nil {
+			log.Printf("sipua: %s: allocating RTP session: %v", p.Endpoint.AOR, err)
+			return
+		}
+		if err := rtpSession.SetRemote(remoteIP, remotePort); err != nil {
+			log.Printf("sipua: %s: setting RTP remote: %v", p.Endpoint.AOR, err)
+			rtpSession.Stop()
+			return
+		}
+
+		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort())
+		if err := dlg.RespondSDP(sdp); err != nil {
+			log.Printf("sipua: %s: responding 200 with SDP: %v", p.Endpoint.AOR, err)
+			rtpSession.Stop()
+			return
+		}
+
+		if callID := req.CallID(); callID != nil {
+			p.calls.Store(callID.Value(), rtpSession)
+		}
+		rtpSession.Start(ctx)
+
+		log.Printf("sipua: %s: answered call from %s, RTP peer %s:%d", p.Endpoint.AOR, req.From().Address.User, remoteIP, remotePort)
 	})
 }
 
-// Dial places a call from this phone to calleeAOR (an extension number) and
-// waits for it to be answered. dialDestination is the actual network target
-// (PBXware's host:port); sipDomain is the domain to put in the SIP headers
-// (see Register's doc comment for why these can differ). rtpPort is our
-// local port to offer for the audio media stream.
-func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR string, rtpPort int) (*sipgo.DialogClientSession, error) {
+// Dial places a call from this phone to calleeAOR (an extension number),
+// waits for it to be answered, and starts exchanging silence-payload RTP
+// with the answering party's advertised address (learned from their SDP
+// answer). dialDestination is the actual network target (PBXware's
+// host:port); sipDomain is the domain to put in the SIP headers (see
+// Register's doc comment for why these can differ).
+func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR string) (*Call, error) {
 	recipient := sip.Uri{}
 	if err := sip.ParseUri(fmt.Sprintf("sip:%s@%s", calleeAOR, sipDomain), &recipient); err != nil {
 		return nil, fmt.Errorf("parsing recipient URI: %w", err)
 	}
 
+	rtpSession, err := NewRTPSession(0)
+	if err != nil {
+		return nil, fmt.Errorf("allocating RTP session: %w", err)
+	}
+
 	req := sip.NewRequest(sip.INVITE, recipient)
 	req.SetDestination(dialDestination)
-	req.SetBody(buildSDP(p.LocalIP, rtpPort))
+	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort()))
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 
 	// Same identity fix as Register: without an explicit From, sipgo
@@ -166,6 +234,7 @@ func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR 
 
 	sess, err := p.DialogClient.WriteInvite(ctx, req)
 	if err != nil {
+		rtpSession.Stop()
 		return nil, fmt.Errorf("sending invite: %w", err)
 	}
 
@@ -173,12 +242,28 @@ func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR 
 		Username: p.Endpoint.Username,
 		Password: p.Endpoint.Password,
 	}); err != nil {
+		rtpSession.Stop()
 		return nil, fmt.Errorf("waiting for answer: %w", err)
 	}
 
 	if err := sess.Ack(ctx); err != nil {
+		rtpSession.Stop()
 		return nil, fmt.Errorf("sending ack: %w", err)
 	}
 
-	return sess, nil
+	remoteIP, remotePort, err := parseSDPMedia(sess.InviteResponse.Body())
+	if err != nil {
+		rtpSession.Stop()
+		return nil, fmt.Errorf("parsing callee's SDP answer: %w", err)
+	}
+	if err := rtpSession.SetRemote(remoteIP, remotePort); err != nil {
+		rtpSession.Stop()
+		return nil, fmt.Errorf("setting RTP remote: %w", err)
+	}
+	rtpSession.Start(ctx)
+
+	callID := req.CallID().Value()
+	p.calls.Store(callID, rtpSession)
+
+	return &Call{session: sess, RTP: rtpSession, phone: p, callID: callID}, nil
 }

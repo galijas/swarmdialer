@@ -70,11 +70,11 @@ func main() {
 	}
 	log.Printf("callee %s registered", *calleeAOR)
 
-	callee.AutoAnswer(*calleePort + 1000) // placeholder RTP port; real allocation comes with the RTP milestone
+	callee.AutoAnswer(ctx)
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer dialCancel()
-	sess, err := caller.Dial(dialCtx, *server, sipDomain, *calleeAOR, *callerPort+1000)
+	call, err := caller.Dial(dialCtx, *server, sipDomain, *calleeAOR)
 	if err != nil {
 		log.Fatalf("dialing %s: %v", *calleeAOR, err)
 	}
@@ -83,9 +83,12 @@ func main() {
 	fmt.Printf("call established, holding for %s...\n", *callDuration)
 	time.Sleep(*callDuration)
 
+	sent, recv := call.RTP.Stats()
+	log.Printf("RTP stats before hangup: sent=%d recv=%d packets", sent, recv)
+
 	byeCtx, byeCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer byeCancel()
-	if err := sess.Bye(byeCtx); err != nil {
+	if err := call.Hangup(byeCtx); err != nil {
 		log.Fatalf("sending bye: %v", err)
 	}
 	log.Println("call ended cleanly")
