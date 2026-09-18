@@ -74,7 +74,6 @@ type provisionRequest struct {
 	TenantCode     string `json:"tenant_code"`
 	TenantName     string `json:"tenant_name"`
 	ExtLength      int    `json:"ext_length"`
-	Package        string `json:"package"`
 	Country        string `json:"country"`
 	National       string `json:"national"`
 	International  string `json:"international"`
@@ -102,8 +101,8 @@ func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
 			Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey,
 			ExtensionCount: req.ExtensionCount,
 			TenantCode:     req.TenantCode, TenantName: req.TenantName,
-			ExtLength: req.ExtLength, Package: req.Package,
-			Country: req.Country, National: req.National, International: req.International,
+			ExtLength: req.ExtLength,
+			Country:   req.Country, National: req.National, International: req.International,
 			ChannelLimit: 600, MaxWait: 10 * time.Minute,
 		}, progress)
 		if err != nil {

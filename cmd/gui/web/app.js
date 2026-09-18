@@ -95,7 +95,7 @@ async function provision(step) {
     extension_count: parseInt(document.getElementById('p' + step + '-ext-count').value, 10),
     tenant_code: document.getElementById('p' + step + '-tenant-code').value.trim(),
     tenant_name: document.getElementById('p' + step + '-tenant-name').value.trim(),
-    ext_length: 3, package: '1', country: '869', national: '1', international: '011',
+    ext_length: 3, country: '869', national: '1', international: '011',
   };
 
   try {

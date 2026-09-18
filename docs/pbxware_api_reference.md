@@ -290,6 +290,69 @@ surfaced it).
 
 ---
 
+## Packages (`action=pbxware.package.*`)
+
+Multi-Tenant editions require an existing tenant **package** to reference
+when creating a tenant (`tenant.add`'s `package` field, an ID) — there's
+no "no package" option. SwarmDialer creates its own
+(`pbxware.EnsureSwarmDialerPackage`, name `SwarmDialerPackage`) rather than
+relying on one already existing on the target instance, since a fresh
+PBXware deployment may not have one set up yet.
+
+### List — `pbxware.package.list`
+**Response**: object keyed by package ID, value is the package name:
+```json
+{"1": "1000"}
+```
+
+### Configuration (get one) — `pbxware.package.configuration`
+**Arguments**: `id` (required).
+**Response**:
+```json
+{
+  "1": {
+    "name": "1000", "service_plan": "", "allowed_service_plans": null,
+    "ext": "1000", "voicemail": "1000", "queues": "1000", "ivr": "1000",
+    "cf": "1000", "rgroups": "1000", "hot_desking": "1000",
+    "restrict_splans": "0", "call_recordings": "0", "monitoring": "0",
+    "call_screening": "0"
+  }
+}
+```
+
+### Add — `pbxware.package.add`
+**⚠️ Request field names don't match the response field names above** —
+found empirically by iterating on the API's own "Required field 'X' is
+missing" errors one at a time (undocumented anywhere we've found):
+
+| Response field | Request field | Meaning |
+|---|---|---|
+| `ext` | `extensions` | Extension limit |
+| `voicemail` | `voicemails` | Voicemail limit |
+| `queues` | `queues` | Queue limit (matches) |
+| `ivr` | `ivrs` | IVR limit |
+| `cf` | `cfs` | Conference limit |
+| `rgroups` | `rgroups` | Ring group limit (matches) |
+| `hot_desking` | `hot_desking` | Hot desking limit (matches) |
+| `restrict_splans` | `restrict_splans` | Restrict service plans (matches) |
+| `call_recordings` | `call_recordings` | Call recording feature (matches) |
+| `monitoring` | `monitoring` | Monitoring feature (matches) |
+| `call_screening` | `call_screening` | Call screening feature (matches) |
+
+Also requires `name`. Working example (SwarmDialer's actual profile — see
+`pbxware.AddPackage`): generous limits everywhere since none of it matters
+for load testing, and every optional feature off since it's all noise:
+```
+action=pbxware.package.add&name=SwarmDialerPackage&extensions=1000&voicemails=1000&queues=1000&ivrs=1000&cfs=1000&rgroups=1000&hot_desking=1000&restrict_splans=0&call_recordings=0&monitoring=0&call_screening=0
+```
+**Response**: `{"success": "Tenant package: 2.", "id": 2}`.
+
+### Delete — `pbxware.package.delete`
+**Arguments**: `id`. Works cleanly (unlike `tenant.delete`, which doesn't)
+— confirmed by creating and immediately deleting a test package.
+
+---
+
 ## License
 
 ### Info — `pbxware.license.info`

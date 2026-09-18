@@ -102,11 +102,13 @@ type ProvisionParams struct {
 	APIKey         string
 	ExtensionCount int
 	// Tenant creation fields — ignored (and tenant creation skipped) if
-	// the license's edition isn't Multi-Tenant.
+	// the license's edition isn't Multi-Tenant. Package is not a field
+	// here — Multi-Tenant editions require an existing package to create
+	// a tenant against, so Provision ensures its own (see
+	// pbxware.EnsureSwarmDialerPackage) rather than taking one as input.
 	TenantCode    string
 	TenantName    string
 	ExtLength     int
-	Package       string
 	Country       string
 	National      string
 	International string
@@ -148,11 +150,18 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 
 	tenantID := 1 // system level — used directly for non-Multi-Tenant editions
 	if license.IsMultiTenant() {
+		progress.set(func() { progress.message = "ensuring tenant package exists" })
+		packageID, err := client.EnsureSwarmDialerPackage()
+		if err != nil {
+			progress.set(func() { progress.done = true; progress.err = err.Error() })
+			return nil, fmt.Errorf("ensuring tenant package: %w", err)
+		}
+
 		progress.set(func() { progress.message = "creating tenant" })
 		id, err := client.AddTenant(pbxware.TenantParams{
 			Name:          p.TenantName,
 			Code:          p.TenantCode,
-			Package:       p.Package,
+			Package:       strconv.Itoa(packageID),
 			ExtLength:     p.ExtLength,
 			Country:       p.Country,
 			National:      p.National,
