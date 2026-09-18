@@ -95,7 +95,12 @@ async function provision(step) {
     extension_count: parseInt(document.getElementById('p' + step + '-ext-count').value, 10),
     tenant_code: document.getElementById('p' + step + '-tenant-code').value.trim(),
     tenant_name: document.getElementById('p' + step + '-tenant-name').value.trim(),
-    ext_length: 3, country: '869', national: '1', international: '011',
+    // 4 digits (not 3) gives headroom for larger extension counts (and
+    // therefore higher call volume, e.g. the +1000 dialer button) without
+    // running out of numbers — matches what non-Multi-Tenant editions
+    // already require anyway (see wizard.Provision's digit-length
+    // detection for those).
+    ext_length: 4, country: '869', national: '1', international: '011',
   };
 
   try {

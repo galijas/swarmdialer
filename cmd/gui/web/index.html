@@ -45,7 +45,7 @@
       <div class="form-row"><label>Tenant name (FQDN-style)</label><input id="p1-tenant-name" value="swarmdialer-a.local"></div>
     </div>
     <div class="form-grid">
-      <div class="form-row"><label>Number of extensions (max 1000)</label><input id="p1-ext-count" type="number" value="10" max="1000" min="2"></div>
+      <div class="form-row"><label>Number of extensions (max 2000)</label><input id="p1-ext-count" type="number" value="10" max="2000" min="2"></div>
     </div>
     <p class="status-line">Note: make sure your PBXware license allows creating this many extensions (see the Extensions limit shown in Step 1).</p>
     <button class="btn" onclick="provision(1)">Create</button>
@@ -82,7 +82,7 @@
       <div class="form-row"><label>Tenant name (FQDN-style)</label><input id="p2-tenant-name" value="swarmdialer-b.local"></div>
     </div>
     <div class="form-grid">
-      <div class="form-row"><label>Number of extensions (max 1000)</label><input id="p2-ext-count" type="number" value="10" max="1000" min="2"></div>
+      <div class="form-row"><label>Number of extensions (max 2000)</label><input id="p2-ext-count" type="number" value="10" max="2000" min="2"></div>
     </div>
     <button class="btn" onclick="provision(2)">Create</button>
     <div class="progress-bar hidden" id="p2-progress-bar"><div style="width:0%"></div></div>
@@ -123,7 +123,8 @@
       <button class="btn" onclick="confirmDial('local',50)">+50</button>
       <button class="btn" onclick="confirmDial('local',100)">+100</button>
       <button class="btn" onclick="confirmDial('local',250)">+250</button>
-      <button class="btn" onclick="confirmDial('local',500)">+500</button>
+      <button class="btn danger" onclick="confirmDial('local',500)">+500</button>
+      <button class="btn danger" onclick="confirmDial('local',1000)">+1000</button>
     </div>
   </div>
 
@@ -140,7 +141,8 @@
       <button class="btn" onclick="confirmDial('remote',50)">+50</button>
       <button class="btn" onclick="confirmDial('remote',100)">+100</button>
       <button class="btn" onclick="confirmDial('remote',250)">+250</button>
-      <button class="btn" onclick="confirmDial('remote',500)">+500</button>
+      <button class="btn danger" onclick="confirmDial('remote',500)">+500</button>
+      <button class="btn danger" onclick="confirmDial('remote',1000)">+1000</button>
     </div>
   </div>
 

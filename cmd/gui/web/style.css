@@ -167,6 +167,12 @@ button.btn.secondary {
 
 button.btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
 
+/* Heaviest-load increment buttons (+500/+1000) — flagged red as a visual
+   warning, distinct from the amber used for ordinary actions, since these
+   two are the ones most likely to actually stress a target PBXware system. */
+button.btn.danger { background: var(--danger); color: #fff; }
+button.btn.danger:hover { background: #ff7a8f; }
+
 .increment-row {
   display: flex;
   gap: 8px;
