@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"swarmdialer/internal/orchestrator"
 )
 
 var upgrader = websocket.Upgrader{
@@ -17,13 +15,13 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// SessionWSHandler upgrades to a WebSocket and pushes the current
-// session's Snapshot every interval until the client disconnects.
-// getSession is a function rather than a fixed *Session because the
-// dashboard's session doesn't exist until the wizard finishes, and this
-// handler needs to keep working correctly regardless of when the client
-// connects relative to that.
-func SessionWSHandler(getSession func() *orchestrator.Session, interval time.Duration) http.Handler {
+// WSHandler upgrades to a WebSocket and pushes whatever getPayload()
+// returns, JSON-encoded, every interval until the client disconnects.
+// getPayload is a function rather than a fixed value because the
+// dashboard's set of live sessions changes over time (servers get added,
+// sessions get created lazily on first dial) — this handler always
+// reflects current state, not whatever existed when the client connected.
+func WSHandler(getPayload func() any, interval time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -35,11 +33,7 @@ func SessionWSHandler(getSession func() *orchestrator.Session, interval time.Dur
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
-			sess := getSession()
-			if sess == nil {
-				continue
-			}
-			if err := conn.WriteJSON(sess.Snapshot()); err != nil {
+			if err := conn.WriteJSON(getPayload()); err != nil {
 				return
 			}
 		}

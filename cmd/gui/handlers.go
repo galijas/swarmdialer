@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	errServerNotFound   = errors.New("server not found")
-	errNeedSecondServer = errors.New("a second server must be connected before remote dialing")
-	errNeedServer       = errors.New("no server configured yet — finish the setup wizard first")
+	errServerNotFound = errors.New("server not found")
+	errNoServerChosen = errors.New("no server selected")
+	errNoPeerChosen   = errors.New("no peer server selected for remote dialing")
+	errNotConnected   = errors.New("selected servers aren't connected by a trunk")
 )
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -186,16 +187,16 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 	// Omit API keys from what the browser sees — no reason to put them in
 	// the DOM/JS console even on a no-auth internal tool.
 	type serverView struct {
-		ID          string                          `json:"id"`
-		Name        string                          `json:"name"`
-		BaseURL     string                          `json:"base_url"`
-		Edition     string                          `json:"edition"`
-		TenantID    int                             `json:"tenant_id"`
-		TenantCode  string                          `json:"tenant_code"`
-		ExtCount    int                             `json:"extension_count"`
-		TrunkID     int                             `json:"trunk_id,omitempty"`
-		PeerServerID string                         `json:"peer_server_id,omitempty"`
-		DIDCount    int                             `json:"did_count"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		BaseURL      string `json:"base_url"`
+		Edition      string `json:"edition"`
+		TenantID     int    `json:"tenant_id"`
+		TenantCode   string `json:"tenant_code"`
+		ExtCount     int    `json:"extension_count"`
+		TrunkID      int    `json:"trunk_id,omitempty"`
+		PeerServerID string `json:"peer_server_id,omitempty"`
+		DIDCount     int    `json:"did_count"`
 	}
 	views := make([]serverView, 0, len(servers))
 	for _, s := range servers {
@@ -211,10 +212,12 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 // --- Dialing ---
 
 type dialRequest struct {
-	Section            string `json:"section"` // "local" or "remote"
-	Count              int    `json:"count"`
-	CallDurationSeconds int   `json:"call_duration_seconds"`
-	UseRTP             bool   `json:"use_rtp"`
+	Section             string `json:"section"`        // "local" or "remote"
+	ServerID            string `json:"server_id"`      // which server's extensions place the calls
+	PeerServerID        string `json:"peer_server_id"` // remote only: which connected peer to dial into
+	Count               int    `json:"count"`
+	CallDurationSeconds int    `json:"call_duration_seconds"`
+	UseRTP              bool   `json:"use_rtp"`
 }
 
 func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +231,7 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, err := a.sessionFor(req.Section)
+	sess, err := a.sessionFor(req.Section, req.ServerID, req.PeerServerID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -245,45 +248,59 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]int{"started": started})
 }
 
-// sessionFor returns the session for "local" or "remote", creating it
-// lazily from the store's configured server(s) on first use.
-func (a *app) sessionFor(section string) (*orchestrator.Session, error) {
+// sessionFor returns the session for dialing from serverID — for "local"
+// section, extensions on serverID call each other directly; for "remote",
+// they dial into peerServerID's extensions over the trunk between them.
+// Sessions are created lazily and cached per server (or per connected
+// pair), so multiple servers/pairs can each have their own live session
+// at once rather than sharing one implicit "the local server" slot.
+func (a *app) sessionFor(section, serverID, peerServerID string) (*orchestrator.Session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	if serverID == "" {
+		return nil, errNoServerChosen
+	}
+	srv := a.store.GetServer(serverID)
+	if srv == nil {
+		return nil, errServerNotFound
+	}
+
 	if section == "remote" {
-		if a.remoteSession != nil {
-			return a.remoteSession, nil
+		if peerServerID == "" {
+			return nil, errNoPeerChosen
 		}
-		servers := a.store.Servers()
-		if len(servers) < 2 {
-			return nil, errNeedSecondServer
+		peer := a.store.GetServer(peerServerID)
+		if peer == nil {
+			return nil, errServerNotFound
 		}
-		srv1, srv2 := servers[0], servers[1]
+		if srv.PeerServerID != peer.ID {
+			return nil, errNotConnected
+		}
+
+		key := serverID + "|" + peerServerID
+		if sess, ok := a.remoteSessions[key]; ok {
+			return sess, nil
+		}
 		sess, err := orchestrator.NewRemoteSession(a.ctx, orchestrator.RemoteSessionConfig{
-			CallerDialDestination: srv1.SIPHost, CallerSIPDomain: srv1.SIPHost,
-			CalleeDialDestination: srv2.SIPHost, CalleeSIPDomain: srv2.SIPHost,
-			LocalIP:         srv1.LocalIP,
-			CallerBasePort:  a.allocPortRangeLocked(len(srv1.Extensions)),
-			CalleeBasePort:  a.allocPortRangeLocked(len(srv2.Extensions)),
+			CallerDialDestination: srv.SIPHost, CallerSIPDomain: srv.SIPHost,
+			CalleeDialDestination: peer.SIPHost, CalleeSIPDomain: peer.SIPHost,
+			LocalIP:         srv.LocalIP,
+			CallerBasePort:  a.allocPortRangeLocked(len(srv.Extensions)),
+			CalleeBasePort:  a.allocPortRangeLocked(len(peer.Extensions)),
 			RegisterTimeout: 15 * time.Second,
 			DialTimeout:     15 * time.Second,
-		}, toEndpoints(srv1.Extensions), toEndpoints(srv2.Extensions), didLookup(srv2))
+		}, toEndpoints(srv.Extensions), toEndpoints(peer.Extensions), didLookup(peer))
 		if err != nil {
 			return nil, err
 		}
-		a.remoteSession = sess
+		a.remoteSessions[key] = sess
 		return sess, nil
 	}
 
-	if a.localSession != nil {
-		return a.localSession, nil
+	if sess, ok := a.localSessions[serverID]; ok {
+		return sess, nil
 	}
-	servers := a.store.Servers()
-	if len(servers) < 1 {
-		return nil, errNeedServer
-	}
-	srv := servers[0]
 	sess, err := orchestrator.NewSession(a.ctx, orchestrator.SessionConfig{
 		DialDestination: srv.SIPHost, SIPDomain: srv.SIPHost,
 		LocalIP:         srv.LocalIP,
@@ -294,7 +311,7 @@ func (a *app) sessionFor(section string) (*orchestrator.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.localSession = sess
+	a.localSessions[serverID] = sess
 	return sess, nil
 }
 
@@ -323,19 +340,5 @@ func didLookup(srv *store.Server) map[string]string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	section := r.URL.Query().Get("section")
-	a.mu.Lock()
-	var sess *orchestrator.Session
-	if section == "remote" {
-		sess = a.remoteSession
-	} else {
-		sess = a.localSession
-	}
-	a.mu.Unlock()
-
-	if sess == nil {
-		writeJSON(w, http.StatusOK, orchestrator.SessionSnapshot{})
-		return
-	}
-	writeJSON(w, http.StatusOK, sess.Snapshot())
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": a.allSnapshots()})
 }

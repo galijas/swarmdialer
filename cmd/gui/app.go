@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +20,13 @@ import (
 var webFS embed.FS
 
 // app holds all server-side state for the GUI: the persisted server
-// config, in-flight wizard jobs, and the two dashboard call sessions
-// (local/remote), created lazily on first use.
+// config, in-flight wizard jobs, and the dashboard's call sessions.
+//
+// Sessions are keyed explicitly by which server(s) they dial, not by a
+// fixed "the local one" / "the remote one" slot — with more than one
+// server configured (e.g. two tenants on the same PBXware box), there can
+// be a separate local session per server and a separate remote session
+// per connected pair, all live at once. See handlers.go's sessionFor.
 type app struct {
 	ctx   context.Context
 	store *store.Store
@@ -28,8 +34,8 @@ type app struct {
 	mu             sync.Mutex
 	provisionJobs  map[string]*wizard.ProvisionProgress
 	connectJobs    map[string]*wizard.ConnectProgress
-	localSession   *orchestrator.Session
-	remoteSession  *orchestrator.Session
+	localSessions  map[string]*orchestrator.Session // server ID -> session
+	remoteSessions map[string]*orchestrator.Session // "callerID|calleeID" -> session
 	nextJobID      uint64
 	nextPortOffset int // grows so successive sessions don't reuse ports
 }
@@ -40,10 +46,12 @@ func newApp(ctx context.Context, configPath string) (*app, error) {
 		return nil, fmt.Errorf("opening config: %w", err)
 	}
 	return &app{
-		ctx:           ctx,
-		store:         st,
-		provisionJobs: make(map[string]*wizard.ProvisionProgress),
-		connectJobs:   make(map[string]*wizard.ConnectProgress),
+		ctx:            ctx,
+		store:          st,
+		provisionJobs:  make(map[string]*wizard.ProvisionProgress),
+		connectJobs:    make(map[string]*wizard.ConnectProgress),
+		localSessions:  make(map[string]*orchestrator.Session),
+		remoteSessions: make(map[string]*orchestrator.Session),
 	}, nil
 }
 
@@ -84,16 +92,40 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 }
 
 func (a *app) sessionWSHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		section := r.URL.Query().Get("section")
-		getSession := func() *orchestrator.Session {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			if section == "remote" {
-				return a.remoteSession
-			}
-			return a.localSession
+	return statusapi.WSHandler(func() any {
+		return map[string]any{"sessions": a.allSnapshots()}
+	}, time.Second)
+}
+
+// namedSnapshot tags one live session's snapshot with which server(s) it
+// belongs to, so the dashboard can show every session at once (not just
+// "the" local one and "the" remote one) and label/color them correctly.
+type namedSnapshot struct {
+	Key      string                       `json:"key"`
+	Type     string                       `json:"type"` // "local" or "remote"
+	Label    string                       `json:"label"`
+	Snapshot orchestrator.SessionSnapshot `json:"snapshot"`
+}
+
+func (a *app) allSnapshots() []namedSnapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	out := make([]namedSnapshot, 0, len(a.localSessions)+len(a.remoteSessions))
+	for id, sess := range a.localSessions {
+		label := id
+		if srv := a.store.GetServer(id); srv != nil {
+			label = srv.Name
 		}
-		statusapi.SessionWSHandler(getSession, time.Second).ServeHTTP(w, r)
-	})
+		out = append(out, namedSnapshot{Key: "local:" + id, Type: "local", Label: label, Snapshot: sess.Snapshot()})
+	}
+	for key, sess := range a.remoteSessions {
+		callerID, calleeID, _ := strings.Cut(key, "|")
+		label := key
+		if caller, callee := a.store.GetServer(callerID), a.store.GetServer(calleeID); caller != nil && callee != nil {
+			label = caller.Name + " → " + callee.Name
+		}
+		out = append(out, namedSnapshot{Key: "remote:" + key, Type: "remote", Label: label, Snapshot: sess.Snapshot()})
+	}
+	return out
 }

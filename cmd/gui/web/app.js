@@ -16,7 +16,7 @@ function showTab(name) {
   document.getElementById('tab-btn-dashboard').classList.toggle('active', name === 'dashboard');
   if (name === 'dashboard') {
     refreshServerList();
-    connectStatusSocket();
+    connectStatusSockets();
   }
 }
 
@@ -202,8 +202,36 @@ async function refreshServerList() {
       </div>`;
     list.appendChild(div);
   });
-  const remotePanel = document.getElementById('remote-dialer-panel');
-  remotePanel.classList.toggle('disabled-overlay', servers.length < 2);
+
+  // Which server "local" dials from, and which connected pair "remote"
+  // dials between, are explicit choices — with more than one server
+  // configured there's no single implicit answer (see the dashboard's
+  // server/pair selects). Both directions of a connected pair are listed
+  // separately since the caller side matters (whose extensions initiate).
+  populateSelect('local-server-select', servers.map(s => ({value: s.id, label: s.name})));
+
+  const byID = new Map(servers.map(s => [s.id, s]));
+  const pairs = [];
+  servers.forEach(s => {
+    const peer = s.peer_server_id && byID.get(s.peer_server_id);
+    if (peer) pairs.push({value: `${s.id}:${peer.id}`, label: `${s.name} → ${peer.name}`});
+  });
+  populateSelect('remote-pair-select', pairs);
+
+  document.getElementById('remote-dialer-panel').classList.toggle('disabled-overlay', pairs.length === 0);
+}
+
+function populateSelect(id, options) {
+  const select = document.getElementById(id);
+  const prevValue = select.value;
+  select.innerHTML = '';
+  options.forEach(opt => {
+    const el = document.createElement('option');
+    el.value = opt.value;
+    el.textContent = opt.label;
+    select.appendChild(el);
+  });
+  if (options.some(opt => opt.value === prevValue)) select.value = prevValue;
 }
 
 // ---------- Dashboard: dialing ----------
@@ -212,83 +240,136 @@ function confirmDial(section, count) {
   if (!confirm(`Start ${count} additional ${section} call(s)?`)) return;
   const duration = parseInt(document.getElementById(section + '-duration').value, 10);
   const useRTP = document.getElementById(section + '-rtp').checked;
+
+  let serverID, peerServerID;
+  if (section === 'remote') {
+    const pairValue = document.getElementById('remote-pair-select').value;
+    if (!pairValue) { logLine('Error: no connected server pair selected.', true); return; }
+    [serverID, peerServerID] = pairValue.split(':');
+  } else {
+    serverID = document.getElementById('local-server-select').value;
+    if (!serverID) { logLine('Error: no server selected.', true); return; }
+  }
+
   api('/api/dial', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({section, count, call_duration_seconds: duration, use_rtp: useRTP}),
+    body: JSON.stringify({
+      section, server_id: serverID, peer_server_id: peerServerID,
+      count, call_duration_seconds: duration, use_rtp: useRTP,
+    }),
   }).then(r => {
     logLine(`Requested +${count} ${section} calls — ${r.started} started (pool availability may limit this).`);
   }).catch(e => logLine('Error: ' + e.message, true));
 }
 
 // ---------- Dashboard: live status ----------
+//
+// One socket carries every live session at once (a session per server for
+// local dialing, a session per connected pair for remote — see
+// cmd/gui/app.go's allSnapshots), each tagged with a stable key, a type
+// ("local"/"remote" — colors the graph/log), and a label (the server or
+// pair name — shown in the log tag). Everything is merged into one
+// combined log/graph/stats display rather than switched between, so you
+// see the whole system at once instead of only ever half of it.
 
-let currentSection = 'local';
 let ws = null;
 let wsReconnectTimer = null;
+const lastSeenEventSeq = new Map(); // session key -> last-shown event seq
+const graphRows = new Map(); // `${sessionKey}:${callId}` -> row element
 
-function switchSection(section) {
-  currentSection = section;
-  lastSeenEventSeq = 0; // local/remote sessions have independent event sequences
-  connectStatusSocket();
+function connectStatusSockets() {
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (ws) { ws.onclose = null; ws.close(); }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const sock = new WebSocket(`${proto}://${location.host}/ws/status`);
+  sock.onmessage = (ev) => {
+    const sessions = (JSON.parse(ev.data).sessions) || [];
+    renderCombinedStats(sessions);
+    renderEvents(sessions);
+    renderGraph(sessions);
+  };
+  // Without this, a dropped connection (GUI server restart, network blip)
+  // leaves the dashboard silently frozen — stats/log/graph all stop
+  // updating with no visible sign anything is wrong, since the one-off
+  // "N started" log line comes from the /api/dial response, not the socket.
+  sock.onclose = () => {
+    wsReconnectTimer = setTimeout(connectStatusSockets, 2000);
+  };
+  ws = sock;
+}
+
+function renderCombinedStats(sessions) {
+  const sum = (key) => sessions.reduce((total, s) => total + (s.snapshot[key] || 0), 0);
+  const activeCount = sessions.reduce((total, s) => total + (s.snapshot.active_calls || []).length, 0);
+  document.getElementById('stat-active').textContent = activeCount;
+  document.getElementById('stat-started').textContent = sum('total_calls_started');
+  document.getElementById('stat-answered').textContent = sum('total_calls_answered');
+  document.getElementById('stat-failed').textContent = sum('total_calls_failed');
+  document.getElementById('stat-rtp').textContent = sum('total_rtp_sent') + sum('total_rtp_recv');
+}
+
+// Log view: one line per lifecycle event (dialing/answered/failed/ended/
+// batch_done), tagged with the session's label — recent_events is a
+// server-side ring buffer per session, we only log the ones newer than
+// the last one we've already shown for that specific session.
+function renderEvents(sessions) {
+  sessions.forEach(s => {
+    (s.snapshot.recent_events || []).forEach(ev => {
+      const lastSeen = lastSeenEventSeq.get(s.key) || 0;
+      if (ev.seq <= lastSeen) return;
+      lastSeenEventSeq.set(s.key, ev.seq);
+      const tag = `<span class="tag ${s.type}">${s.label}</span>`;
+      const pair = `${ev.caller_aor} &rarr; ${ev.callee_aor}`;
+      if (ev.type === 'dialing') logLine(`${tag}dialing ${pair}`);
+      else if (ev.type === 'answered') logLine(`${tag}<span class="ok">answered</span> ${pair}`);
+      else if (ev.type === 'failed') logLine(`${tag}<span class="err">failed</span> ${pair} — ${ev.detail}`, true);
+      else if (ev.type === 'ended') logLine(`${tag}ended ${pair} (${ev.detail})`);
+      else if (ev.type === 'batch_done') logLine(`${tag}<strong>${ev.detail}</strong>`);
+    });
+  });
+}
+
+// Call graph: one row per active call — two dots joined by an animated
+// dashed line (a little "data flowing" motion), colored by whether it's a
+// local or remote call. Rows are created/removed as calls start/end and
+// otherwise updated in place, so the flow animation never restarts.
+function renderGraph(sessions) {
+  const seen = new Set();
+  sessions.forEach(s => {
+    (s.snapshot.active_calls || []).forEach(c => {
+      const rowKey = `${s.key}:${c.id}`;
+      seen.add(rowKey);
+      let row = graphRows.get(rowKey);
+      if (!row) {
+        row = document.createElement('div');
+        row.className = `call-graph-row ${s.type}`;
+        row.innerHTML = `<span class="tag ${s.type}">${s.label}</span>` +
+          '<span class="call-dot"></span><span class="call-line"></span>' +
+          '<span class="call-dot"></span><span class="call-label"></span>';
+        document.getElementById('call-graph-rows').appendChild(row);
+        graphRows.set(rowKey, row);
+      }
+      row.classList.toggle('rtp-off', !(c.rtp_sent > 0 || c.rtp_recv > 0));
+      row.querySelector('.call-label').textContent = `${c.caller_aor} → ${c.callee_aor}`;
+    });
+  });
+  for (const [key, row] of graphRows) {
+    if (!seen.has(key)) {
+      row.remove();
+      graphRows.delete(key);
+    }
+  }
 }
 
 function setStatusView(view) {
   document.getElementById('view-btn-log').classList.toggle('active', view === 'log');
-  document.getElementById('view-btn-graphic').classList.toggle('active', view === 'graphic');
+  document.getElementById('view-btn-graph').classList.toggle('active', view === 'graph');
   document.getElementById('call-log').classList.toggle('hidden', view !== 'log');
-  document.getElementById('call-graphic').classList.toggle('hidden', view !== 'graphic');
+  document.getElementById('call-graph').classList.toggle('hidden', view !== 'graph');
 }
 
-function connectStatusSocket() {
-  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-  if (ws) { ws.onclose = null; ws.close(); ws = null; }
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws/status?section=${currentSection}`);
-  ws.onmessage = (ev) => {
-    const snap = JSON.parse(ev.data);
-    renderSnapshot(snap);
-  };
-  // Without this, a dropped connection (GUI server restart, network blip)
-  // leaves the dashboard silently frozen — stats/log/graphic all stop
-  // updating with no visible sign anything is wrong, since the one-off
-  // "N started" log line comes from the /api/dial response, not the socket.
-  ws.onclose = () => {
-    wsReconnectTimer = setTimeout(connectStatusSocket, 2000);
-  };
-}
-
-let lastSeenEventSeq = 0;
-
-function renderSnapshot(snap) {
-  document.getElementById('stat-active').textContent = (snap.active_calls || []).length;
-  document.getElementById('stat-started').textContent = snap.total_calls_started || 0;
-  document.getElementById('stat-answered').textContent = snap.total_calls_answered || 0;
-  document.getElementById('stat-failed').textContent = snap.total_calls_failed || 0;
-  document.getElementById('stat-rtp').textContent = (snap.total_rtp_sent || 0) + (snap.total_rtp_recv || 0);
-
-  // Log view: one line per lifecycle event (dialing/answered/failed/ended),
-  // per extension pair — recent_events is a server-side ring buffer, we
-  // only log the ones newer than the last one we've already shown.
-  (snap.recent_events || []).forEach(ev => {
-    if (ev.seq <= lastSeenEventSeq) return;
-    lastSeenEventSeq = ev.seq;
-    const pair = `${ev.caller_aor} &rarr; ${ev.callee_aor}`;
-    if (ev.type === 'dialing') logLine(`dialing ${pair}`);
-    else if (ev.type === 'answered') logLine(`<span class="ok">answered</span> ${pair}`);
-    else if (ev.type === 'failed') logLine(`<span class="err">failed</span> ${pair} — ${ev.detail}`, true);
-    else if (ev.type === 'ended') logLine(`ended ${pair} (${ev.detail})`);
-    else if (ev.type === 'batch_done') logLine(`<strong>${ev.detail}</strong>`);
-  });
-
-  // Graphic view: one dot per active call, green if RTP flowing.
-  const grid = document.getElementById('call-dot-grid');
-  grid.innerHTML = '';
-  (snap.active_calls || []).forEach(c => {
-    const dot = document.createElement('div');
-    dot.className = 'call-dot' + (c.rtp_sent > 0 ? ' rtp' : '');
-    dot.title = `${c.caller_aor} -> ${c.callee_aor} (sent ${c.rtp_sent}, recv ${c.rtp_recv})`;
-    grid.appendChild(dot);
-  });
+function clearLog() {
+  document.getElementById('call-log').innerHTML = '';
 }
 
 function logLine(html, isError) {
@@ -300,3 +381,20 @@ function logLine(html, isError) {
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
 }
+
+// ---------- Init ----------
+//
+// The wizard is the right landing page only the first time, before any
+// server is configured — every later visit, whoever's setting up the
+// dashboard almost certainly wants the dashboard, not to re-walk the
+// wizard. Reconfiguring is still one click away via the dashboard's
+// "Reconfigure" button.
+(async function init() {
+  try {
+    const {servers} = await api('/api/servers');
+    if (servers.length > 0) showTab('dashboard');
+  } catch (e) {
+    // Can't reach the API — stay on the wizard (the default) rather than
+    // silently failing somewhere less obvious.
+  }
+})();

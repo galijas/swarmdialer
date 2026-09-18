@@ -3,12 +3,16 @@
 <head>
 <meta charset="utf-8">
 <title>SwarmDialer</title>
+<link rel="icon" type="image/svg+xml" href="/icons/logo.svg">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <header>
-  <h1>SwarmDialer</h1>
+  <div class="brand">
+    <img src="/icons/logo-white.svg" alt="" class="brand-icon">
+    <h1>SwarmDialer</h1>
+  </div>
   <nav class="tabs">
     <button id="tab-btn-wizard" class="active" onclick="showTab('wizard')">Setup Wizard</button>
     <button id="tab-btn-dashboard" onclick="showTab('dashboard')">Dashboard</button>
@@ -110,6 +114,7 @@
     <h2>Local Dialer</h2>
     <p class="status-line">Places calls between extensions on the same server.</p>
     <div class="form-grid">
+      <div class="form-row"><label>Server</label><select id="local-server-select"></select></div>
       <div class="form-row"><label>Call duration (seconds)</label><input id="local-duration" type="number" value="30"></div>
       <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (silence audio)</label></div>
     </div>
@@ -124,8 +129,9 @@
 
   <div class="panel" id="remote-dialer-panel">
     <h2>Remote Dialer</h2>
-    <p class="status-line">Places calls from Server A's extensions to Server B's extensions over the trunk (via DID).</p>
+    <p class="status-line">Places calls from one connected server's extensions to another's, over the trunk between them (via DID).</p>
     <div class="form-grid">
+      <div class="form-row"><label>Server pair</label><select id="remote-pair-select"></select></div>
       <div class="form-row"><label>Call duration (seconds)</label><input id="remote-duration" type="number" value="30"></div>
       <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (silence audio)</label></div>
     </div>
@@ -141,22 +147,19 @@
   <div class="panel">
     <h2>Live Status</h2>
     <div class="stats-row">
-      <div class="stat"><div class="value" id="stat-active">0</div><div class="label">Active calls</div></div>
+      <div class="stat active"><div class="value" id="stat-active">0</div><div class="label">Active calls</div></div>
       <div class="stat"><div class="value" id="stat-started">0</div><div class="label">Total calls started</div></div>
-      <div class="stat"><div class="value" id="stat-answered">0</div><div class="label">Answered</div></div>
-      <div class="stat"><div class="value" id="stat-failed">0</div><div class="label">Failed</div></div>
-      <div class="stat"><div class="value" id="stat-rtp">0</div><div class="label">Total RTP packets</div></div>
+      <div class="stat answered"><div class="value" id="stat-answered">0</div><div class="label">Answered</div></div>
+      <div class="stat failed"><div class="value" id="stat-failed">0</div><div class="label">Failed</div></div>
+      <div class="stat rtp"><div class="value" id="stat-rtp">0</div><div class="label">Total RTP packets</div></div>
     </div>
     <div class="view-toggle">
       <button id="view-btn-log" class="active" onclick="setStatusView('log')">Log</button>
-      <button id="view-btn-graphic" onclick="setStatusView('graphic')">Graphic</button>
-      <select id="status-section-select" onchange="switchSection(this.value)" style="margin-left:auto">
-        <option value="local">Local</option>
-        <option value="remote">Remote</option>
-      </select>
+      <button id="view-btn-graph" onclick="setStatusView('graph')">Call Graph</button>
+      <button class="btn secondary" id="clear-log-btn" onclick="clearLog()">Clear Log</button>
     </div>
     <div id="call-log"></div>
-    <div id="call-graphic" class="hidden"><div class="call-dot-grid" id="call-dot-grid"></div></div>
+    <div id="call-graph" class="hidden"><div id="call-graph-rows"></div></div>
   </div>
 
 </section>

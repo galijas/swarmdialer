@@ -14,7 +14,11 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", ":8080", "address to serve the GUI on")
+	// Port 80 so the wizard/dashboard is reachable at just http://<host>/ —
+	// no port to remember or type. Binding it requires root (or
+	// CAP_NET_BIND_SERVICE) on Linux; every deployment path we ship
+	// (install.sh, manual `sudo ./bin/gui`) already runs as root.
+	addr := flag.String("addr", ":80", "address to serve the GUI on")
 	configPath := flag.String("config", "swarmdialer_config.json", "path to the persisted config file")
 	flag.Parse()
 

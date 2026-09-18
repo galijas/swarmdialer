@@ -54,7 +54,7 @@ log "build complete: $BIN_DIR/gui (the main GUI server), plus provisioning/loadt
 if [ "${1:-}" = "--systemd" ]; then
   UNIT=/etc/systemd/system/swarmdialer.service
   INSTALL_ROOT="$(pwd)"
-  log "installing systemd service (listening on :8080) at $UNIT"
+  log "installing systemd service (listening on :80) at $UNIT"
   cat > "$UNIT" <<EOF
 [Unit]
 Description=SwarmDialer GUI
@@ -62,7 +62,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=$INSTALL_ROOT
-ExecStart=$INSTALL_ROOT/bin/gui -addr :8080 -config $INSTALL_ROOT/swarmdialer_config.json
+ExecStart=$INSTALL_ROOT/bin/gui -addr :80 -config $INSTALL_ROOT/swarmdialer_config.json
 Restart=on-failure
 
 [Install]
@@ -72,5 +72,5 @@ EOF
   systemctl enable --now swarmdialer
   log "service started — check with: systemctl status swarmdialer"
 else
-  log "run './bin/gui' to start the GUI (default port :8080), or re-run this script with --systemd to install it as a service"
+  log "run 'sudo ./bin/gui' to start the GUI (port 80 needs root), or re-run this script with --systemd to install it as a service"
 fi
