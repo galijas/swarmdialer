@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,7 @@ type RTPSession struct {
 	packetsSent atomic.Uint64
 	packetsRecv atomic.Uint64
 	stop        chan struct{}
+	stopOnce    sync.Once
 }
 
 // NewRTPSession opens a UDP socket for RTP traffic. Passing localPort 0 lets
@@ -82,11 +84,17 @@ func (s *RTPSession) Start(ctx context.Context) {
 	go s.recvLoop(ctx)
 }
 
-// Stop halts sending/receiving and releases the socket. Safe to call at most
-// once per session.
+// Stop halts sending/receiving and releases the socket. Safe to call more
+// than once (or concurrently) on the same session — confirmed live
+// (2026-09-19) that it legitimately can be: our own call-duration timeout
+// (Call.Hangup) and the other party's BYE arriving at nearly the same
+// moment can both end up calling Stop on the same session under load,
+// and this used to panic with "close of closed channel" when that raced.
 func (s *RTPSession) Stop() {
-	close(s.stop)
-	s.conn.Close()
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		s.conn.Close()
+	})
 }
 
 // Stats returns packet counts sent/received so far — useful for confirming
