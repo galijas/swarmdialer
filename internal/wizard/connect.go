@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 // servers.
 type ConnectProgress struct {
 	mu      sync.Mutex
-	stage   string // "trunk", "dids"
+	stage   string // "trunk", "default-trunk", "dids", "settling"
 	total   int
 	created int
 	done    bool
@@ -49,13 +50,14 @@ func (p *ConnectProgress) Snapshot() ConnectProgressSnapshot {
 // servers (symmetric: a trunk on each side, with matching credentials so
 // they authenticate each other) and one DID per extension on *each* side,
 // mapped back to that extension — so either server's extensions can dial
-// the other's via the trunk. Mutates a and b in place (TrunkID, DIDs) —
-// save them via the caller's store after this returns.
+// the other's via the trunk. For any Multi-Tenant side, also sets the new
+// trunk as that tenant's default outbound trunk (see
+// pbxware.SetTenantDefaultTrunk — required for outbound calls to actually
+// establish, not just optional). Mutates a and b in place (TrunkID, DIDs)
+// — save them via the caller's store after this returns.
 //
 // See docs/pbxware_api_reference.md's Trunks/DIDs sections: trunks are
-// system-level objects (server=1) even in Tenant Mode, and dialing a DID's
-// exact number just works once it exists — no extra "default trunk"
-// config needed (verified live).
+// system-level objects (server=1) even in Tenant Mode.
 func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	progress.set(func() { progress.stage = "trunk" })
 
@@ -111,6 +113,20 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	a.TrunkID, b.TrunkID = trunkA.TrunkID, trunkB.TrunkID
 	a.PeerServerID, b.PeerServerID = b.ID, a.ID
 
+	progress.set(func() { progress.stage = "default-trunk" })
+	if isMultiTenantEdition(a.Edition) {
+		if err := clientA.SetTenantDefaultTrunk(a.TenantID, trunkA.TrunkID); err != nil {
+			progress.set(func() { progress.done = true; progress.err = err.Error() })
+			return fmt.Errorf("setting default trunk on %s: %w", a.Name, err)
+		}
+	}
+	if isMultiTenantEdition(b.Edition) {
+		if err := clientB.SetTenantDefaultTrunk(b.TenantID, trunkB.TrunkID); err != nil {
+			progress.set(func() { progress.done = true; progress.err = err.Error() })
+			return fmt.Errorf("setting default trunk on %s: %w", b.Name, err)
+		}
+	}
+
 	total := len(a.Extensions) + len(b.Extensions)
 	progress.set(func() { progress.stage = "dids"; progress.total = total })
 
@@ -161,6 +177,10 @@ func addDIDsFor(client *pbxware.Client, srv *store.Server, trunkID int, progress
 	}
 	srv.DIDs = dids
 	return nil
+}
+
+func isMultiTenantEdition(edition string) bool {
+	return strings.EqualFold(edition, "Multi-Tenant")
 }
 
 func hostOnly(sipHost string) string {

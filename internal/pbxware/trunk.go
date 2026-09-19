@@ -62,7 +62,7 @@ func (c *Client) GenericSIPProviderID(tenantID int) (int, error) {
 // to authenticate each other. See docs/pbxware_api_reference.md's Trunks
 // section for the full field reference.
 type TrunkParams struct {
-	Server        int    // Tenant/Server ID
+	Server        int // Tenant/Server ID
 	Name          string
 	ProviderID    int    // Generic SIP's ID — see GenericSIPProviderID
 	Host          string // this side's host
@@ -86,28 +86,28 @@ type TrunkResult struct {
 // need this to be configurable beyond what TrunkParams exposes.
 func (c *Client) AddTrunk(p TrunkParams) (TrunkResult, error) {
 	params := url.Values{
-		"server":          {strconv.Itoa(p.Server)},
-		"name":            {p.Name},
-		"provider_id":     {strconv.Itoa(p.ProviderID)},
-		"type":            {"friend"},
-		"dtmfmode":        {"rfc2833"},
-		"status":          {"active"},
-		"country":         {p.Country},
-		"national":        {p.National},
-		"international":   {p.International},
-		"emerg_trunk":     {"no"},
-		"host":            {p.Host},
-		"username":        {p.Username},
-		"secret":          {p.Secret},
-		"peer_host":       {p.PeerHost},
-		"peer_username":   {p.PeerUsername},
-		"peer_secret":     {p.PeerSecret},
-		"insecure":        {"port,invite"},
-		"looserouting":    {"yes"},
-		"incominglimit":   {"600"},
-		"outgoinglimit":   {"600"},
-		"codecs":          {"ulaw,alaw"},
-		"codecs_ptime":    {"20,20"}, // one ptime per codec — must match codecs' item count
+		"server":        {strconv.Itoa(p.Server)},
+		"name":          {p.Name},
+		"provider_id":   {strconv.Itoa(p.ProviderID)},
+		"type":          {"friend"},
+		"dtmfmode":      {"rfc2833"},
+		"status":        {"active"},
+		"country":       {p.Country},
+		"national":      {p.National},
+		"international": {p.International},
+		"emerg_trunk":   {"no"},
+		"host":          {p.Host},
+		"username":      {p.Username},
+		"secret":        {p.Secret},
+		"peer_host":     {p.PeerHost},
+		"peer_username": {p.PeerUsername},
+		"peer_secret":   {p.PeerSecret},
+		"insecure":      {"port,invite"},
+		"looserouting":  {"yes"},
+		"incominglimit": {"600"},
+		"outgoinglimit": {"600"},
+		"codecs":        {"ulaw,alaw"},
+		"codecs_ptime":  {"20,20"}, // one ptime per codec — must match codecs' item count
 	}
 	body, err := c.call("pbxware.trunk.add", params)
 	if err != nil {
@@ -118,4 +118,37 @@ func (c *Client) AddTrunk(p TrunkParams) (TrunkResult, error) {
 		return TrunkResult{}, fmt.Errorf("trunk.add succeeded but response had no usable id: %w", err)
 	}
 	return TrunkResult{TrunkID: id}, nil
+}
+
+// SetTenantDefaultTrunk sets trunkID as tenantID's primary (and only, for
+// SwarmDialer's purposes) outbound trunk — Multi-Tenant only, there's no
+// equivalent for non-Multi-Tenant/system-level editions (confirmed live:
+// pbxware.tenant.trunks.list/set on a non-tenant-mode instance returns
+// "Tenant mode is not enabled").
+//
+// This step is not optional, despite an earlier (same-physical-instance)
+// test suggesting it was: creating the trunk and DIDs alone is enough for
+// *inbound* routing (dialing a DID from the outside reaches the mapped
+// extension fine), but a tenant's own extensions placing *outbound* calls
+// over a trunk that was never set as the tenant's default trunk signal as
+// answered (a real 200 OK) while never actually establishing media —
+// confirmed live (2026-09-19): RTP was one-way or absent entirely (0
+// packets received back) until this was set, then real bidirectional RTP
+// flowed immediately. The earlier finding only held because that test
+// used two tenants on the *same* physical PBXware instance, where local-
+// channel routing apparently doesn't need a designated default trunk the
+// way a real cross-instance trunk hop does.
+//
+// The action name doesn't follow the usual two-part object.method
+// convention — it's the three-part pbxware.tenant.trunks.list/set, found
+// by noticing a PHP "Undefined array key 3" warning on the two-part
+// pbxware.tenant.trunks, which was the API's own hint that a fourth
+// dot-separated segment was expected.
+func (c *Client) SetTenantDefaultTrunk(tenantID, trunkID int) error {
+	_, err := c.call("pbxware.tenant.trunks.set", url.Values{
+		"tenant":        {strconv.Itoa(tenantID)},
+		"trunks":        {strconv.Itoa(trunkID)},
+		"primary_trunk": {strconv.Itoa(trunkID)},
+	})
+	return err
 }
