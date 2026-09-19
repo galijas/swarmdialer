@@ -11,7 +11,17 @@ import (
 // buildSDP produces a minimal single-audio-stream SDP body offering/answering
 // G.711 (ulaw/alaw) on rtpPort. It doesn't negotiate anything fancy — that's
 // all SwarmDialer needs for silence-payload load testing.
-func buildSDP(localIP string, rtpPort int) []byte {
+//
+// sendMedia controls the direction attribute: true → "sendrecv" (normal
+// two-way silence RTP), false → "inactive" (signaling-only call, no media
+// either direction — the standard SDP convention for this, so both a real
+// SIP stack and our own peer will honor it symmetrically, unlike e.g.
+// silently dropping the media line, which some stacks reject).
+func buildSDP(localIP string, rtpPort int, sendMedia bool) []byte {
+	direction := "inactive"
+	if sendMedia {
+		direction = "sendrecv"
+	}
 	return []byte(fmt.Sprintf(
 		"v=0\r\n"+
 			"o=- 0 0 IN IP4 %s\r\n"+
@@ -21,9 +31,23 @@ func buildSDP(localIP string, rtpPort int) []byte {
 			"m=audio %d RTP/AVP 0 8\r\n"+
 			"a=rtpmap:0 PCMU/8000\r\n"+
 			"a=rtpmap:8 PCMA/8000\r\n"+
-			"a=sendrecv\r\n",
-		localIP, localIP, rtpPort,
+			"a=%s\r\n",
+		localIP, localIP, rtpPort, direction,
 	))
+}
+
+// sdpWantsMedia reports whether a received SDP body's direction attribute
+// calls for media to actually flow. Defaults to true (sendrecv) if no
+// direction attribute is present, per SDP convention.
+func sdpWantsMedia(body []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "a=inactive" {
+			return false
+		}
+	}
+	return true
 }
 
 // parseSDPMedia extracts the peer's audio media address from an SDP body:

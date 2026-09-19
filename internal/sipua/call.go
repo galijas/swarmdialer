@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/emiago/sipgo"
 	"github.com/emiago/sipgo/sip"
@@ -179,6 +180,7 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 			log.Printf("sipua: %s: parsing caller's SDP offer: %v", p.Endpoint.AOR, err)
 			return
 		}
+		sendMedia := sdpWantsMedia(req.Body())
 
 		rtpSession, err := NewRTPSession(0)
 		if err != nil {
@@ -191,7 +193,7 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 			return
 		}
 
-		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort())
+		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia)
 		if err := dlg.RespondSDP(sdp); err != nil {
 			log.Printf("sipua: %s: responding 200 with SDP: %v", p.Endpoint.AOR, err)
 			rtpSession.Stop()
@@ -201,19 +203,36 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 		if callID := req.CallID(); callID != nil {
 			p.calls.Store(callID.Value(), rtpSession)
 		}
-		rtpSession.Start(ctx)
+		if sendMedia {
+			rtpSession.Start(ctx)
+		}
 
 		log.Printf("sipua: %s: answered call from %s, RTP peer %s:%d", p.Endpoint.AOR, req.From().Address.User, remoteIP, remotePort)
 	})
 }
 
 // Dial places a call from this phone to calleeAOR (an extension number),
-// waits for it to be answered, and starts exchanging silence-payload RTP
-// with the answering party's advertised address (learned from their SDP
-// answer). dialDestination is the actual network target (PBXware's
-// host:port); sipDomain is the domain to put in the SIP headers (see
-// Register's doc comment for why these can differ).
-func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR string) (*Call, error) {
+// waits for it to be answered, and — if sendMedia is true — starts
+// exchanging silence-payload RTP with the answering party's advertised
+// address (learned from their SDP answer). If sendMedia is false, the call
+// is signaling-only: full INVITE/ACK/BYE still happens (for accurate
+// call-setup load), but no RTP packets flow either direction (the SDP
+// direction attribute is set to "inactive," which the answering side
+// honors symmetrically — see sipua.buildSDP). dialDestination is the
+// actual network target (PBXware's host:port); sipDomain is the domain to
+// put in the SIP headers (see Register's doc comment for why these can
+// differ).
+//
+// ctx governs the whole call's lifetime — in particular, it's what
+// RTPSession.Start uses, so it must stay live for as long as the call
+// should hold, not just long enough to establish it. dialTimeout bounds
+// only the INVITE/ACK handshake itself (a separate, shorter-lived context
+// derived from ctx) — do NOT pass an already-short-lived ctx here and
+// expect a long call duration to work; a previous version of this
+// function conflated the two and silently truncated RTP to whatever
+// timeout the caller used for dialing, which went unnoticed until the
+// Session rework's tighter testing surfaced it (see PROJECT_STATE.md).
+func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestination, sipDomain, calleeAOR string, sendMedia bool) (*Call, error) {
 	recipient := sip.Uri{}
 	if err := sip.ParseUri(fmt.Sprintf("sip:%s@%s", calleeAOR, sipDomain), &recipient); err != nil {
 		return nil, fmt.Errorf("parsing recipient URI: %w", err)
@@ -226,7 +245,7 @@ func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR 
 
 	req := sip.NewRequest(sip.INVITE, recipient)
 	req.SetDestination(dialDestination)
-	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort()))
+	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia))
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 
 	// Same identity fix as Register: without an explicit From, sipgo
@@ -239,13 +258,16 @@ func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR 
 	req.AppendHeader(&from)
 	req.AppendHeader(&sip.ToHeader{DisplayName: calleeAOR, Address: recipient})
 
-	sess, err := p.DialogClient.WriteInvite(ctx, req)
+	handshakeCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
+	sess, err := p.DialogClient.WriteInvite(handshakeCtx, req)
 	if err != nil {
 		rtpSession.Stop()
 		return nil, fmt.Errorf("sending invite: %w", err)
 	}
 
-	if err := sess.WaitAnswer(ctx, sipgo.AnswerOptions{
+	if err := sess.WaitAnswer(handshakeCtx, sipgo.AnswerOptions{
 		Username: p.Endpoint.Username,
 		Password: p.Endpoint.Password,
 	}); err != nil {
@@ -253,7 +275,7 @@ func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR 
 		return nil, fmt.Errorf("waiting for answer: %w", err)
 	}
 
-	if err := sess.Ack(ctx); err != nil {
+	if err := sess.Ack(handshakeCtx); err != nil {
 		rtpSession.Stop()
 		return nil, fmt.Errorf("sending ack: %w", err)
 	}
@@ -267,7 +289,9 @@ func (p *Phone) Dial(ctx context.Context, dialDestination, sipDomain, calleeAOR 
 		rtpSession.Stop()
 		return nil, fmt.Errorf("setting RTP remote: %w", err)
 	}
-	rtpSession.Start(ctx)
+	if sendMedia {
+		rtpSession.Start(ctx)
+	}
 
 	callID := req.CallID().Value()
 	p.calls.Store(callID, rtpSession)

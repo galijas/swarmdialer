@@ -159,12 +159,17 @@ Concrete implications for what we're about to build:
   or remote dialer — needs a shared "available extensions" pool per
   instance with reservation/release around each call's lifecycle, rather
   than the local and remote dialers each assuming exclusive access.
-- **DID `destination` field**: unclear from docs whether it wants the
-  extension number or its internal ID — verify live when implementing DID
-  creation (see `pbxware_api_reference.md`).
-- **Outbound trunk routing mechanism**: per-extension `primary_trunk` vs.
-  a genuine tenant-wide default — verify live (see
-  `pbxware_api_reference.md`'s Trunks section).
+- ~~**DID `destination` field**~~ — resolved: it's the plain extension
+  number, confirmed live via `did.list`.
+- ~~**Outbound trunk routing mechanism**~~ — resolved, and simpler than
+  expected: no default-trunk config needed at all. Create the trunk + one
+  DID per extension; dialing the DID's exact number just works via
+  PBXware's own dialplan fallthrough. Verified end-to-end (dialed a DID
+  from a different tenant's extension, it rang and answered on the target
+  tenant's extension) — though only tested with both "tenants" on the same
+  physical instance so far; re-verify across two real separate PBXware
+  boxes once available. See `pbxware_api_reference.md`'s Trunks section
+  for the full trace.
 - **"Write access confirmation" in wizard step 1**: PBXware API keys
   appear to be all-or-nothing admin keys (no read/write scoping we've
   seen), so in practice this probably just means "confirm the key/IP work
@@ -173,32 +178,48 @@ Concrete implications for what we're about to build:
   without actually creating something. Treat "read call succeeds" as
   sufficient confirmation unless this proves wrong in practice.
 
-## Implementation plan (phased)
+## Implementation plan (phased) — ALL PHASES BUILT 2026-09-18
 
-1. **Backend config/session store** — persist connected servers (API
-   keys, IPs, provisioned extensions, DIDs, trunk info) to a JSON file so
-   the dashboard has something to read after the wizard completes and
-   after restarts.
-2. **Wizard backend endpoints** — test connection (+ edition detection via
-   `license.info`), provision tenant+extensions with live progress
-   (reusing/extending the existing provisioning module and its
-   retry-with-backoff logic), create trunk+DIDs for a second instance.
-3. **Orchestrator rework** — from one-shot batch `Run()` calls to a
-   persistent, incrementally-growable call pool: a long-lived "session"
-   that tracks all registered phones and active calls, supports adding N
-   more pairs at any time (drawing from the available-extensions pool),
-   and keeps existing calls held/untouched when new ones are added. This
-   is the piece the additive +N button behavior depends on.
-4. **Frontend** — Setup Wizard tab first (wired to phase 2's endpoints),
-   then Dashboard tab (server status, local/remote dialer with increment
-   buttons + call-length/RTP config, live status log/graphic view fed by
-   the WebSocket).
-5. **Install/deploy script** — `install.sh` (or Makefile) for the
-   git-clone-and-run-on-a-fresh-VPS workflow (see Portability requirement
-   above): install Go if missing, build the binaries, optionally set up a
-   systemd service for the GUI server. Do this once the GUI itself is
-   working, not before — no point automating deployment of something
-   still changing shape.
+1. ~~**Backend config/session store**~~ — done: `internal/store` (JSON
+   file, `swarmdialer_config.json` by default, gitignored — see its
+   pattern already established for `PROJECT_STATE.md`/`extensions*.json`).
+2. ~~**Wizard backend endpoints**~~ — done: `internal/wizard`
+   (`TestConnection`, `Provision` with live progress, `ConnectServers` for
+   trunk+DIDs) plus `internal/netutil.DetectLocalIP` for the
+   no-manual-entry local IP requirement.
+3. ~~**Orchestrator rework**~~ — done: `internal/orchestrator/session.go`.
+   `Session` (local, one pool) and `NewRemoteSession` (two pools + DID
+   lookup) both support `AddCalls` growing an already-running pool.
+4. ~~**Frontend**~~ — done: `cmd/gui/web/` (plain HTML/CSS/vanilla JS,
+   embedded into the binary via `go:embed`). Setup Wizard tab + Dashboard
+   tab per spec.
+5. ~~**Install/deploy script**~~ — done: `install.sh` (installs
+   ca-certificates + Go if missing, builds all binaries, optional
+   `--systemd` flag).
+
+**Validation performed** (see PROJECT_STATE.md's 2026-09-18 progress log
+for the full trail): every backend piece was tested against the real
+PBXware instance, including the full HTTP+WebSocket API surface (not just
+internal Go calls) — test-connection, provision-with-progress, the
+dial/status/websocket loop, and RTP flowing for the full correct call
+duration. Trunk+DID creation and cross-tenant dialing (local mode and
+`NewRemoteSession`) were both validated against real tenants on the one
+physical PBXware instance available.
+
+**Not yet validated — genuinely needs the user**:
+- **The actual frontend has never been opened in a browser.** All of its
+  API calls were verified correct via direct HTTP/WebSocket testing, and
+  the JS was written carefully against that verified contract, but visual
+  layout, click-through flow, and any JS typos that only manifest in a
+  real browser (vs. `go vet`, which doesn't check JS at all) are
+  unverified. This is the most important thing to test first.
+- Remote calling (`NewRemoteSession`) was validated using two tenants on
+  the *same* physical PBXware instance (no second real instance available
+  to us) — the mechanics are proven, but true cross-machine trunk/DID
+  behavior isn't yet confirmed.
+- `install.sh` was written carefully against the same steps done manually
+  throughout this project, but hasn't been run against a genuinely fresh
+  VPS end-to-end (only the pieces it automates were tested individually).
 
 Not yet started as of 2026-09-18 — see `PROJECT_STATE.md`'s roadmap for
 current status.

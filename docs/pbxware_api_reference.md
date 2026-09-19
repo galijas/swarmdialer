@@ -313,7 +313,7 @@ privacy/RPID/recording etc., all safely omittable):
 
 | Field | Required? | Notes |
 |---|---|---|
-| `server` | **Required** | Tenant/Server ID |
+| `server` | **Required** | **Must be `1` (System level) even in Tenant Mode** — confirmed live: passing the tenant ID gets `"In tenant mode, make sure server=1."`. Trunks are system-wide objects even on multi-tenant installs; tenants get *pointed at* a trunk (see the "default trunk" open question above), they don't own one. |
 | `name` | **Required** | Trunk name |
 | `provider_id` | **Required** | `20` for Generic SIP |
 | `type` | **Required** | `user`, `friend`, or `peer` |
@@ -330,8 +330,8 @@ privacy/RPID/recording etc., all safely omittable):
 | `insecure` | **Required** | `port`, `invite`, `port,invite`, or `very` |
 | `looserouting` | **Required** | `yes`/`no`/`1`/`0` |
 | `incominglimit`/`outgoinglimit` | **Required** | Trunk-level (not tenant-level — different from the tenant channel-limit gotcha above) |
-| `codecs` | **Required** | Colon-separated, e.g. `ulaw:alaw` |
-| `codecs_ptime` | **Required** | `10`, `20`, `30`... `300` |
+| `codecs` | **Required** | **Comma-separated** (confirmed live via the field's validation regex — docs text was ambiguous/misleading here), e.g. `ulaw,alaw`. Note this differs from extensions' `acodecs` field, which genuinely is colon-separated. |
+| `codecs_ptime` | **Required** | **Must have the same number of comma-separated values as `codecs`** (confirmed live: `"Fields codecs and codecs_ptime must match in size"`), e.g. `codecs=ulaw,alaw` needs `codecs_ptime=20,20`, not a single shared value. Each value one of `10`, `20`, `30`... `300`. |
 
 **To connect instance A ↔ instance B**: create a trunk on A with
 `host`=A's IP, `peer_host`=B's IP, and a shared `username`/`secret` pair
@@ -341,16 +341,41 @@ be symmetric). Mirror with a second trunk on B pointing back at A.
 
 **Successful response**: `{ "success": "Trunk ID: 10", "id": 10 }`
 
-**Open question, not yet resolved**: how outbound calls actually get
-routed onto a specific trunk isn't fully clear from the docs alone.
-Extensions have `primary_trunk`/`secondary_trunk`/`tertiary_trunk` fields
-(seen in the Extensions field list) — this may be what "set as default
-trunk for the tenant" means in practice (per-extension, set on every
-extension in the tenant, rather than one tenant-wide switch). Verify this
-empirically against the real system when building this — don't guess
-further from docs alone, this system's docs have repeatedly not matched
-reality in edge cases (tenant_code range, secret complexity, this exact
-channel-limit field mismatch, etc.).
+**Resolved (2026-09-18), simpler than expected**: no "default trunk"
+configuration is needed at all for SwarmDialer's use case. Tested live:
+created a trunk (system-level, `server=1`) and one DID on tenant 700
+mapped to its own extension 100, then dialed that DID's exact number
+(`5551000`) from a *different* tenant's extension (999400) with no other
+config — **it worked immediately**, ringing and answering on tenant 700's
+extension 100. PBXware's dialplan apparently falls through to a
+system-level DID lookup automatically once a matching DID exists, for any
+dialed number that isn't a local extension. So: create the trunk + one DID
+per extension, and dialing the exact DID number is enough — no need to
+touch extensions' `primary_trunk`/`secondary_trunk` fields.
+(Tested with both "tenants" on the same physical PBXware instance, which
+proves the DID/trunk *mechanics* — trunk routing to a real different
+instance's IP is standard Asterisk SIP-peer behavior and should work
+identically, but hasn't been verified end-to-end across two physically
+separate PBXware boxes yet — do that once a second real instance is
+available.)
+
+**New finding from testing with two trunks simultaneously**: trunks need a
+**settling period after creation**, same as tenants/extensions. With two
+system-level trunks created back-to-back (one per direction, for
+`wizard.ConnectServers`), dialing a DID through the trunk created *most
+recently* failed immediately with:
+```
+NOTICE core_local.c: No such extension/context 9700100@SwarmDialer-to-ServerA while calling Local channel
+```
+Retried the identical call ~90s later with no other change — it worked.
+The *other* direction's trunk (created slightly earlier, given a bit more
+incidental time before first use) worked on the first try. There's no
+read-back API call that confirms "this trunk is ready" the way
+`tenant.configuration` does for channel limits, so `ConnectServers` just
+does a blind `time.Sleep(90 * time.Second)` after creating both trunks and
+all DIDs, rather than retry+verify. Empirically tuned, not derived from
+any documented guarantee — may need adjustment on a different/faster
+PBXware instance.
 
 ### Edit / Delete — `pbxware.trunk.edit` / `pbxware.trunk.delete`
 Same shape as tenant edit/delete (edit: same args as add, optional except
@@ -373,7 +398,7 @@ billing/CRM/recording etc.):
 | `did` | **Required** | The actual DID number |
 | `name` | optional | Display name |
 | `dest_type` | **Required** | `0` = Extension (what SwarmDialer needs); other values: Ring Group, IVR, Queue, External Number, etc. — see full enum in source PDF if ever needed |
-| `destination` | **Required** (for dest_type ≠ Phone Callback/Deny Access) | The target — **unclear from docs whether this should be the extension number or its internal ID; verify live when implementing** |
+| `destination` | **Required** (for dest_type ≠ Phone Callback/Deny Access) | The target. For `dest_type=0` (Extension): **the plain extension number** (confirmed live via `did.list` — not the extension's internal ID) |
 | `disabled` | **Required** | `0` = enabled, `1` = disabled |
 
 **Successful response**: `{ "success": "DID ID: 1.", "id": 1 }`

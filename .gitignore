@@ -10,3 +10,9 @@ PROJECT_STATE.md
 # Provisioning/load-test output — contains SIP secrets
 extensions*.json
 
+# SwarmDialer GUI's per-deployment config store — contains PBXware API
+# keys and provisioned extension secrets, generated fresh by the Setup
+# Wizard on each deployment. Never part of the repo (see docs/gui_spec.md's
+# portability requirement).
+swarmdialer_config*.json
+

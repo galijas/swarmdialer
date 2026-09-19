@@ -72,9 +72,7 @@ func main() {
 
 	callee.AutoAnswer(ctx)
 
-	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
-	defer dialCancel()
-	call, err := caller.Dial(dialCtx, *server, sipDomain, *calleeAOR)
+	call, err := caller.Dial(ctx, 15*time.Second, *server, sipDomain, *calleeAOR, true)
 	if err != nil {
 		log.Fatalf("dialing %s: %v", *calleeAOR, err)
 	}
