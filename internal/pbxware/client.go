@@ -135,7 +135,7 @@ type TenantChannelLimits struct {
 }
 
 // GetTenantChannelLimits reads a tenant's current channel-like limits — see
-// SetTenantChannelLimits for the request/response field-name mismatches
+// ResaveTenant for the request/response field-name mismatches
 // (only Auto Attendants' request and response names happen to match).
 func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, error) {
 	body, err := c.call("pbxware.tenant.configuration", url.Values{"id": {strconv.Itoa(tenantID)}})
@@ -161,17 +161,48 @@ func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, erro
 	return limits, nil
 }
 
-// SetTenantChannelLimits raises (or sets) every one of a tenant's
-// channel-like concurrency pools to the same limit — Local/Remote SIP
-// channels, Conferences, Queues, Enhanced Ring Groups, Auto Attendants,
-// and DAHDI (see TenantChannelLimits). PBXware defaults every one of these
-// to 8 independently, regardless of package or license (no per-tenant
-// license limit exists; only a system-wide total channel count is
-// licensed), and none of them are settable by sending back the response
-// field name as a request param (e.g. incominglimit/outgoinglimit,
-// conch/quech/ergch/zapch as request params are silently ignored — only
-// aach happens to double as its own request param name). The request must
-// use these differently-named parameters instead:
+// ResaveTenant raises (or sets) every one of a tenant's channel-like
+// concurrency pools to the same limit — Local/Remote SIP channels,
+// Conferences, Queues, Enhanced Ring Groups, Auto Attendants, and DAHDI
+// (see TenantChannelLimits) — and, in the same tenant.edit call, resends
+// the tenant's own current name/code/package/ext_length/country/national/
+// international unchanged.
+//
+// That second part isn't optional. Confirmed live (2026-09-19): a
+// tenant.edit that sends *only* the channel-limit fields can leave a
+// freshly-created tenant unable to actually place or receive calls —
+// every SIP REGISTER rejected outright with 403, or every INVITE declined
+// with 603 — even though every limit reads back correctly afterward. This
+// is the exact effect a manual "Save" on the tenant in PBXware's admin
+// GUI fixes, and the GUI's Save resubmits the tenant's whole form, not
+// just the fields being changed. A previous version of this function only
+// ever sent the channel-limit fields and could leave a tenant in this
+// broken state with no error raised anywhere — the limits looked correct,
+// calls just silently failed. Fetching the tenant's current identity
+// fields and resending them alongside the channel limits in one edit
+// reproduces the GUI's fix; the narrow edit alone does not.
+//
+// Timing matters too, and isn't fully solved by this function alone: a
+// resave done immediately after tenant creation reliably fixes SIP
+// REGISTER-level rejection (403/500) but can still leave calls between
+// extensions declining with 603 shortly afterward — the same eventually-
+// consistent-backend pattern already seen elsewhere in this API (e.g. the
+// ~90s trunk settling wait in wizard.ConnectServers): the DB write and
+// this function's own read-back both succeed fast, but whatever PBXware
+// does at the Asterisk/dialplan level to actually act on it lags behind.
+// A second ResaveTenant call once real wall-clock time has passed (e.g.
+// after extension creation finishes, not immediately after tenant
+// creation) has fixed this live — see wizard.Provision, which calls this
+// twice for exactly that reason.
+//
+// PBXware defaults every one of the channel-like pools to 8 independently,
+// regardless of package or license (no per-tenant license limit exists;
+// only a system-wide total channel count is licensed), and none of them
+// are settable by sending back the response field name as a request param
+// (e.g. incominglimit/outgoinglimit, conch/quech/ergch/zapch as request
+// params are silently ignored — only aach happens to double as its own
+// request param name). The request must use these differently-named
+// parameters instead:
 //
 //	response field -> request param
 //	incominglimit   -> local_channels
@@ -194,8 +225,11 @@ func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, erro
 // The underlying tenant.edit call follows the same slow-write pattern as
 // AddTenant (frequently outlasts the HTTP client's own timeout even when it
 // succeeds server-side), so this retries with backoff and verifies via
-// GetTenantChannelLimits rather than trusting the HTTP response alone.
-func (c *Client) SetTenantChannelLimits(tenantID, limit int, maxWait time.Duration) error {
+// GetTenantChannelLimits rather than trusting the HTTP response alone —
+// note that verification only covers the channel limits actually applying,
+// since there's no API-visible signal for "the registration/dialplan
+// brokenness this also fixes is gone."
+func (c *Client) ResaveTenant(tenantID, limit, extLength int, maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	delay := 5 * time.Second
 	const maxDelay = 30 * time.Second
@@ -205,8 +239,22 @@ func (c *Client) SetTenantChannelLimits(tenantID, limit int, maxWait time.Durati
 			l.Queues == limit && l.EnhancedRingGroups == limit && l.AutoAttendants == limit && l.DAHDI == limit
 	}
 
+	config, err := c.call("pbxware.tenant.configuration", url.Values{"id": {strconv.Itoa(tenantID)}})
+	if err != nil {
+		return fmt.Errorf("reading tenant %d's configuration before resaving: %w", tenantID, err)
+	}
+	identityFields := url.Values{
+		"tenant_name":   {fmt.Sprint(config["server_name"])},
+		"tenant_code":   {fmt.Sprint(config["tenantcode"])},
+		"package":       {fmt.Sprint(config["package_id"])},
+		"ext_length":    {strconv.Itoa(extLength)},
+		"country":       {fmt.Sprint(config["country"])},
+		"national":      {fmt.Sprint(config["national"])},
+		"international": {fmt.Sprint(config["international"])},
+	}
+
 	for {
-		_, editErr := c.call("pbxware.tenant.edit", url.Values{
+		params := url.Values{
 			"server":               {"1"},
 			"id":                   {strconv.Itoa(tenantID)},
 			"local_channels":       {strconv.Itoa(limit)},
@@ -216,7 +264,11 @@ func (c *Client) SetTenantChannelLimits(tenantID, limit int, maxWait time.Durati
 			"enhanced_ring_groups": {strconv.Itoa(limit)},
 			"aach":                 {strconv.Itoa(limit)},
 			"dahdi":                {strconv.Itoa(limit)},
-		})
+		}
+		for k, v := range identityFields {
+			params[k] = v
+		}
+		_, editErr := c.call("pbxware.tenant.edit", params)
 
 		current, readErr := c.GetTenantChannelLimits(tenantID)
 		if readErr == nil && matches(current) {

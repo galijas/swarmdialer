@@ -105,7 +105,7 @@ func (c *Client) UpdatePackage(id int, name string) error {
 // EnsureSwarmDialerPackage returns the ID of the SwarmDialerPackageName
 // tenant package, creating it if it doesn't already exist — or updating
 // it to the current profile if it does, the same "always re-apply,
-// whether new or reused" approach as SetTenantChannelLimits. Packages are
+// whether new or reused" approach as ResaveTenant. Packages are
 // system-level, not per-tenant, so on a PBXware instance SwarmDialer has
 // already provisioned once, later tenants reuse (and refresh) the same
 // package rather than creating a duplicate every time.

@@ -75,11 +75,15 @@ func main() {
 	// Attendants, DAHDI) to 8 each, independently, regardless of
 	// package/license — always raise them all, whether this tenant was
 	// just created or is being reused, since existing/GUI-created tenants
-	// default to 8 too. See SetTenantChannelLimits's doc comment.
-	if err := client.SetTenantChannelLimits(server, *channelLimit, *maxWait); err != nil {
-		log.Fatalf("raising tenant %d's channel limit: %v", server, err)
+	// default to 8 too. This also resends the tenant's own current
+	// identity/locale fields unchanged, which — confirmed live — is
+	// necessary for a freshly-created tenant to actually be able to place
+	// or receive calls at all, not just for the channel limits themselves.
+	// See pbxware.ResaveTenant's doc comment.
+	if err := client.ResaveTenant(server, *channelLimit, *extLength, *maxWait); err != nil {
+		log.Fatalf("resaving tenant %d: %v", server, err)
 	}
-	log.Printf("tenant %d channel limit set to %d", server, *channelLimit)
+	log.Printf("tenant %d resaved, channel limit set to %d", server, *channelLimit)
 
 	var created []pbxware.ProvisionedExtension
 	for i := 0; i < *count; i++ {

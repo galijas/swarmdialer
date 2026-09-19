@@ -112,7 +112,7 @@ type ProvisionParams struct {
 	Country       string
 	National      string
 	International string
-	ChannelLimit  int // raised from PBXware's 8 default — see pbxware.SetTenantChannelLimits
+	ChannelLimit  int // raised from PBXware's 8 default — see pbxware.ResaveTenant
 	MaxWait       time.Duration
 }
 
@@ -150,7 +150,8 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 
 	tenantID := 1            // system level — used directly for non-Multi-Tenant editions
 	extDigits := p.ExtLength // Multi-Tenant: our own free choice, set on the tenant below
-	if license.IsMultiTenant() {
+	isMultiTenant := license.IsMultiTenant()
+	if isMultiTenant {
 		progress.set(func() { progress.message = "ensuring tenant package exists" })
 		packageID, err := client.EnsureSwarmDialerPackage()
 		if err != nil {
@@ -192,10 +193,10 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 			return nil, fmt.Errorf("tenant %d never showed up: %w", id, err)
 		}
 
-		progress.set(func() { progress.message = "raising tenant channel limit" })
-		if err := client.SetTenantChannelLimits(id, p.ChannelLimit, p.MaxWait); err != nil {
+		progress.set(func() { progress.message = "resaving tenant (channel limits + full config)" })
+		if err := client.ResaveTenant(id, p.ChannelLimit, p.ExtLength, p.MaxWait); err != nil {
 			progress.set(func() { progress.done = true; progress.err = err.Error() })
-			return nil, fmt.Errorf("raising channel limit: %w", err)
+			return nil, fmt.Errorf("resaving tenant: %w", err)
 		}
 
 		tenantID = id
@@ -295,6 +296,23 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 	}
 
 	srv.Extensions = extensions
+
+	if isMultiTenant {
+		// A second resave, now that real wall-clock time has actually
+		// passed since tenant creation (extension creation above takes at
+		// least several seconds, often minutes) — confirmed live
+		// (2026-09-19) that a resave done immediately after creation can
+		// still leave calls declining with 603 shortly afterward even
+		// though it already fixed SIP REGISTER-level rejection; a second
+		// resave once time has passed cleared that up completely. See
+		// pbxware.ResaveTenant's doc comment.
+		progress.set(func() { progress.message = "resaving tenant again (settling)" })
+		if err := client.ResaveTenant(tenantID, p.ChannelLimit, p.ExtLength, p.MaxWait); err != nil {
+			progress.set(func() { progress.done = true; progress.err = err.Error() })
+			return nil, fmt.Errorf("resaving tenant (second pass): %w", err)
+		}
+	}
+
 	progress.set(func() { progress.done = true; progress.message = "done" })
 	return srv, nil
 }
