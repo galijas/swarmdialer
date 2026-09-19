@@ -38,33 +38,49 @@ func (c *Client) ListPackages() (map[int]string, error) {
 	return out, nil
 }
 
-// AddPackage creates a tenant package with SwarmDialer's fixed load-testing
-// profile: generous (1000) limits on every per-tenant resource category a
-// package gates, and every optional feature (call recording, monitoring,
-// call screening, restricted service plans) turned off, since none of it
-// matters for load testing and only adds noise/risk of hitting a limit
-// unrelated to what's actually being tested.
+// swarmDialerPackageLimit is applied to every per-tenant resource category
+// a package gates (extensions, voicemails, queues, IVRs, conferences, ring
+// groups, hot desking). Raised from 1000 to 2000 alongside the switch to
+// 4-digit Multi-Tenant extensions and the dashboard's +1000 dialer button
+// (1000 concurrent local calls needs 2000 extensions, 2 per call) — a
+// package capping extensions below what the tenant is asked to create
+// would silently cap provisioning short of what was requested.
+const swarmDialerPackageLimit = 2000
+
+// packageParams builds the pbxware.package.add/edit request body for
+// SwarmDialer's fixed load-testing profile: generous limits everywhere,
+// every optional feature (call recording, monitoring, call screening,
+// restricted service plans) turned off, since none of it matters for load
+// testing and only adds noise/risk of hitting a limit unrelated to what's
+// actually being tested.
 //
-// package.add's required field names are a different shape than what
+// Required field names are a different shape than what
 // package.configuration reports back for the same values (pluralized/
 // renamed: extensions/voicemails/ivrs/cfs vs. ext/voicemail/ivr/cf) —
 // found empirically by iterating on the API's own "Required field 'X' is
 // missing" errors, since this isn't documented anywhere we've found.
-func (c *Client) AddPackage(name string) (int, error) {
-	body, err := c.call("pbxware.package.add", url.Values{
+func packageParams(name string) url.Values {
+	limit := strconv.Itoa(swarmDialerPackageLimit)
+	return url.Values{
 		"name":            {name},
-		"extensions":      {"1000"},
-		"voicemails":      {"1000"},
-		"queues":          {"1000"},
-		"ivrs":            {"1000"},
-		"cfs":             {"1000"}, // conferences
-		"rgroups":         {"1000"}, // ring groups
-		"hot_desking":     {"1000"},
+		"extensions":      {limit},
+		"voicemails":      {limit},
+		"queues":          {limit},
+		"ivrs":            {limit},
+		"cfs":             {limit}, // conferences
+		"rgroups":         {limit}, // ring groups
+		"hot_desking":     {limit},
 		"restrict_splans": {"0"}, // restrict service plans: no
 		"call_recordings": {"0"},
 		"monitoring":      {"0"},
 		"call_screening":  {"0"},
-	})
+	}
+}
+
+// AddPackage creates a tenant package with SwarmDialer's fixed profile —
+// see packageParams.
+func (c *Client) AddPackage(name string) (int, error) {
+	body, err := c.call("pbxware.package.add", packageParams(name))
 	if err != nil {
 		return 0, err
 	}
@@ -75,11 +91,24 @@ func (c *Client) AddPackage(name string) (int, error) {
 	return id, nil
 }
 
+// UpdatePackage re-applies SwarmDialer's fixed profile (see packageParams)
+// to an existing package — used by EnsureSwarmDialerPackage so a package
+// created by an older version of this tool (e.g. with the previous 1000
+// limit) gets corrected automatically instead of silently staying stale.
+func (c *Client) UpdatePackage(id int, name string) error {
+	params := packageParams(name)
+	params.Set("id", strconv.Itoa(id))
+	_, err := c.call("pbxware.package.edit", params)
+	return err
+}
+
 // EnsureSwarmDialerPackage returns the ID of the SwarmDialerPackageName
-// tenant package, creating it if it doesn't already exist. Packages are
+// tenant package, creating it if it doesn't already exist — or updating
+// it to the current profile if it does, the same "always re-apply,
+// whether new or reused" approach as SetTenantChannelLimits. Packages are
 // system-level, not per-tenant, so on a PBXware instance SwarmDialer has
-// already provisioned once, later tenants reuse the same package rather
-// than creating a duplicate every time.
+// already provisioned once, later tenants reuse (and refresh) the same
+// package rather than creating a duplicate every time.
 func (c *Client) EnsureSwarmDialerPackage() (int, error) {
 	packages, err := c.ListPackages()
 	if err != nil {
@@ -87,6 +116,9 @@ func (c *Client) EnsureSwarmDialerPackage() (int, error) {
 	}
 	for id, name := range packages {
 		if name == SwarmDialerPackageName {
+			if err := c.UpdatePackage(id, name); err != nil {
+				return 0, fmt.Errorf("updating existing tenant package: %w", err)
+			}
 			return id, nil
 		}
 	}
