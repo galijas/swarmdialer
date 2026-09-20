@@ -198,6 +198,11 @@ button.btn.stop:hover { background: #7ec2ff; }
   grid-column: span 2;
 }
 
+/* Grid items stretch to fill their column by default — Stop All would
+   otherwise stretch to the full column width instead of staying its
+   natural button size. */
+.increment-row > button.btn.stop { justify-self: start; }
+
 .increment-row button {
   min-width: 64px;
 }
