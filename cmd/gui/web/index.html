@@ -114,38 +114,50 @@
   <div class="panel">
     <h2>Local Dialer</h2>
     <p class="status-line">Places calls between extensions on the same server.</p>
-    <div class="form-grid">
-      <div class="form-row"><label>Server</label><select id="local-server-select"></select></div>
-      <div class="form-row"><label>Call duration (seconds)</label><input id="local-duration" type="number" value="30"></div>
-      <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (silence audio)</label></div>
-    </div>
-    <div class="increment-row">
-      <button class="btn" onclick="confirmDial('local',25)">+25</button>
-      <button class="btn" onclick="confirmDial('local',50)">+50</button>
-      <button class="btn" onclick="confirmDial('local',100)">+100</button>
-      <button class="btn" onclick="confirmDial('local',250)">+250</button>
-      <button class="btn danger" onclick="confirmDial('local',500)">+500</button>
-      <button class="btn danger" onclick="confirmDial('local',1000)">+1000</button>
-      <button class="btn danger" onclick="confirmStop('local')">Stop All</button>
+    <div class="dialer-layout">
+      <div class="form-grid dialer-fields">
+        <div class="form-row"><label>Server</label><select id="local-server-select"></select></div>
+        <div class="form-row"><label>Call duration (seconds)</label><input id="local-duration" type="number" value="30"></div>
+        <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (silence audio)</label></div>
+      </div>
+      <div class="dialer-actions">
+        <div class="increment-row">
+          <button class="btn" onclick="confirmDial('local',25)">+25</button>
+          <button class="btn" onclick="confirmDial('local',50)">+50</button>
+          <button class="btn" onclick="confirmDial('local',100)">+100</button>
+          <button class="btn" onclick="confirmDial('local',250)">+250</button>
+          <button class="btn danger" onclick="confirmDial('local',500)">+500</button>
+          <button class="btn danger" onclick="confirmDial('local',1000)">+1000</button>
+        </div>
+        <div class="increment-row stop-row">
+          <button class="btn stop" onclick="confirmStop('local')">Stop All</button>
+        </div>
+      </div>
     </div>
   </div>
 
   <div class="panel" id="remote-dialer-panel">
     <h2>Remote Dialer</h2>
     <p class="status-line">Places calls from one connected server's extensions to another's, over the trunk between them (via DID).</p>
-    <div class="form-grid">
-      <div class="form-row"><label>Server pair</label><select id="remote-pair-select"></select></div>
-      <div class="form-row"><label>Call duration (seconds)</label><input id="remote-duration" type="number" value="30"></div>
-      <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (silence audio)</label></div>
-    </div>
-    <div class="increment-row">
-      <button class="btn" onclick="confirmDial('remote',25)">+25</button>
-      <button class="btn" onclick="confirmDial('remote',50)">+50</button>
-      <button class="btn" onclick="confirmDial('remote',100)">+100</button>
-      <button class="btn" onclick="confirmDial('remote',250)">+250</button>
-      <button class="btn danger" onclick="confirmDial('remote',500)">+500</button>
-      <button class="btn danger" onclick="confirmDial('remote',1000)">+1000</button>
-      <button class="btn danger" onclick="confirmStop('remote')">Stop All</button>
+    <div class="dialer-layout">
+      <div class="form-grid dialer-fields">
+        <div class="form-row"><label>Server pair</label><select id="remote-pair-select"></select></div>
+        <div class="form-row"><label>Call duration (seconds)</label><input id="remote-duration" type="number" value="30"></div>
+        <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (silence audio)</label></div>
+      </div>
+      <div class="dialer-actions">
+        <div class="increment-row">
+          <button class="btn" onclick="confirmDial('remote',25)">+25</button>
+          <button class="btn" onclick="confirmDial('remote',50)">+50</button>
+          <button class="btn" onclick="confirmDial('remote',100)">+100</button>
+          <button class="btn" onclick="confirmDial('remote',250)">+250</button>
+          <button class="btn danger" onclick="confirmDial('remote',500)">+500</button>
+          <button class="btn danger" onclick="confirmDial('remote',1000)">+1000</button>
+        </div>
+        <div class="increment-row stop-row">
+          <button class="btn stop" onclick="confirmStop('remote')">Stop All</button>
+        </div>
+      </div>
     </div>
   </div>
 

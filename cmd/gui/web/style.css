@@ -173,6 +173,30 @@ button.btn.secondary:hover { border-color: var(--accent); color: var(--accent); 
 button.btn.danger { background: var(--danger); color: #fff; }
 button.btn.danger:hover { background: #ff7a8f; }
 
+/* Stop All — same blue as the Live Status "Total RTP packets" stat, so it
+   reads as a distinct, calmer control from the load-generating (amber/red)
+   dialer buttons next to it. */
+button.btn.stop { background: var(--local); color: #06263f; }
+button.btn.stop:hover { background: #7ec2ff; }
+
+/* Server/duration/RTP fields on the left, the +N buttons and Stop All
+   stacked on the right — see .dialer-fields/.dialer-actions. */
+.dialer-layout {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.dialer-fields {
+  flex: 1 1 320px;
+}
+
+.dialer-actions {
+  flex: 1 1 320px;
+  display: flex;
+  flex-direction: column;
+}
+
 .increment-row {
   display: flex;
   gap: 8px;
@@ -183,6 +207,11 @@ button.btn.danger:hover { background: #ff7a8f; }
 .increment-row button {
   min-width: 64px;
 }
+
+/* Extra top margin separates Stop All from the +N row above it, roughly
+   lining it up with the Send RTP checkbox in the fields column to its
+   left. */
+.stop-row { margin-top: 12px; }
 
 .progress-bar {
   height: 6px;
