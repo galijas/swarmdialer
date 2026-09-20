@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -61,8 +62,23 @@ func (c *Client) call(action string, params url.Values) (map[string]any, error) 
 	}
 	defer resp.Body.Close()
 
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response for %s: %w", action, err)
+	}
+
 	var body map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(raw, &body); err != nil {
+		// PBXware's PHP backend serializes an empty associative array as a
+		// JSON array ("[]") rather than an object ("{}") — confirmed live
+		// on pbxware.tenant.list once the last tenant is deleted (PHP
+		// can't tell an empty map from an empty list, so json_encode
+		// defaults to the array form). Treat an empty array the same as
+		// an empty object; anything else is a genuine decode failure.
+		var arr []any
+		if err2 := json.Unmarshal(raw, &arr); err2 == nil && len(arr) == 0 {
+			return map[string]any{}, nil
+		}
 		return nil, fmt.Errorf("decoding response for %s: %w", action, err)
 	}
 

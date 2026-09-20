@@ -411,6 +411,17 @@ async function refreshSettingsTab() {
   });
 }
 
+// Disables (or re-enables) every reset-related button together, so an
+// instance reset, "reset SwarmDialer," and "reset all" can never overlap
+// — running two of these concurrently against the same server raced in
+// practice (one job's trunk/tenant delete stepping on the other's, the
+// second's store removal then failing with "no server with id ...").
+function setSettingsResetButtonsDisabled(disabled) {
+  ['reset-instance-1-btn', 'reset-instance-2-btn', 'reset-swarmdialer-btn', 'reset-all-btn'].forEach(id => {
+    document.getElementById(id).disabled = disabled;
+  });
+}
+
 // Starts a reset-instance job and polls it to completion, updating
 // statusEl live with whatever step is currently running (e.g. "deleting
 // tenant 18", "waiting for tenant 18 to finish deleting (can take
@@ -442,10 +453,11 @@ function runResetInstanceJob(serverID, statusEl, label) {
 async function resetInstance(index) {
   const btn = document.getElementById(`reset-instance-${index + 1}-btn`);
   const serverID = btn.dataset.serverId;
-  if (!serverID) return;
+  if (!serverID || btn.disabled) return; // guards against a double-click firing two overlapping reset jobs
   const name = btn.textContent.replace('Reset ', '');
   if (!confirm(`Reset ${name}? This deletes everything SwarmDialer created on that PBXware instance (trunk, tenant/package or extensions) and cannot be undone.`)) return;
 
+  setSettingsResetButtonsDisabled(true);
   const statusEl = document.getElementById('reset-instance-status');
   statusEl.textContent = 'Starting...';
   statusEl.className = 'status-line';
@@ -455,11 +467,16 @@ async function resetInstance(index) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
   }
-  refreshSettingsTab();
+  setSettingsResetButtonsDisabled(false);
+  refreshSettingsTab(); // re-disables the instance buttons if their server is now gone
 }
 
 async function resetSwarmDialer() {
+  const btn = document.getElementById('reset-swarmdialer-btn');
+  if (btn.disabled) return; // guards against a double-click
   if (!confirm('Reset SwarmDialer to default? This deletes SwarmDialer\'s saved configuration and restarts the GUI. It does NOT touch anything on PBXware.')) return;
+
+  setSettingsResetButtonsDisabled(true);
   const statusEl = document.getElementById('reset-swarmdialer-status');
   statusEl.textContent = 'Resetting and restarting...';
   statusEl.className = 'status-line';
@@ -469,11 +486,15 @@ async function resetSwarmDialer() {
     // A dropped connection here is expected — the process restarts right
     // after responding.
   }
-  await waitForRestart(statusEl);
+  await waitForRestart(statusEl); // page reloads once back up, so no need to re-enable btn here
 }
 
 async function resetAll() {
+  const btn = document.getElementById('reset-all-btn');
+  if (btn.disabled) return; // guards against a double-click
   if (!confirm('Reset ALL connected instances and SwarmDialer itself? This cannot be undone.')) return;
+
+  setSettingsResetButtonsDisabled(true);
   const statusEl = document.getElementById('reset-all-status');
   statusEl.className = 'status-line';
   try {
@@ -486,7 +507,7 @@ async function resetAll() {
   } catch (e) {
     // ignore — a dropped connection is expected once the process restarts
   }
-  await waitForRestart(statusEl);
+  await waitForRestart(statusEl); // page reloads once back up, so no need to re-enable btn here
 }
 
 // Polls /api/servers until the just-restarted process answers again (it

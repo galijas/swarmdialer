@@ -183,14 +183,14 @@
   <div class="panel">
     <h2>Reset SwarmDialer</h2>
     <p class="status-line">Deletes SwarmDialer's saved configuration and restarts the GUI, back to a fresh-deployment state. Does not touch anything on PBXware — reset the instances above first if you want those cleaned up too.</p>
-    <button class="btn danger" onclick="resetSwarmDialer()">Reset SwarmDialer to Default</button>
+    <button class="btn danger" id="reset-swarmdialer-btn" onclick="resetSwarmDialer()">Reset SwarmDialer to Default</button>
     <div class="status-line" id="reset-swarmdialer-status"></div>
   </div>
 
   <div class="panel">
     <h2>Full Reset</h2>
     <p class="status-line">Resets every connected instance, then resets SwarmDialer itself. This cannot be undone.</p>
-    <button class="btn danger" onclick="resetAll()">Reset All Instances &amp; SwarmDialer VPS</button>
+    <button class="btn danger" id="reset-all-btn" onclick="resetAll()">Reset All Instances &amp; SwarmDialer VPS</button>
     <div class="status-line" id="reset-all-status"></div>
   </div>
 
