@@ -66,7 +66,7 @@ async function testConnection(step) {
     const result = await api('/api/wizard/test-connection', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req),
     });
-    statusEl.textContent = `Connected. Edition: ${result.edition}. License limits — Extensions: ${result.extensions}, Tenants: ${result.tenants}, DIDs: ${result.dids}, VOIP Trunks: ${result.voip_trunks}, Channels: ${result.channels}.`;
+    statusEl.textContent = `Connected. Edition: ${result.edition}. License limits — Extensions: ${result.extensions}, Tenants: ${result.tenants}, DIDs: ${result.dids}, VOIP Trunks: ${result.voip_trunks}, Channels: ${result.channels}. Note: PBXware's system-wide Local/Remote channel limits default to 246 regardless of license — raise these manually in the PBXware admin GUI (not automatable via the API) if you need more than 246 simultaneous calls.`;
 
     const pIdx = step;
     const editionNote = document.getElementById('p' + pIdx + '-edition-note');
