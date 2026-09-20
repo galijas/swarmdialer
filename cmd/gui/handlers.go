@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -352,11 +353,14 @@ type resetInstanceRequest struct {
 
 // handleResetInstance tears down everything SwarmDialer created on one
 // PBXware instance (see wizard.ResetInstance) and removes it from the
-// store. Best-effort on the PBXware side — a partial failure (reported as
-// a "warning" in the response, not an HTTP error) still results in the
-// server being removed from SwarmDialer, since staying "connected" to an
-// instance whose trunk/tenant might already be half-deleted isn't useful
-// either way.
+// store, in the background — a Multi-Tenant tenant delete can take
+// several minutes (see resetTenantGoneWait), so this returns a job_id
+// immediately for the caller to poll via handleResetInstanceStatus,
+// the same pattern as provision/connect. Best-effort on the PBXware side
+// — a partial failure (reported as a "warning" on the job, not an HTTP
+// error) still results in the server being removed from SwarmDialer,
+// since staying "connected" to an instance whose trunk/tenant might
+// already be half-deleted isn't useful either way.
 func (a *app) handleResetInstance(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -373,39 +377,54 @@ func (a *app) handleResetInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	warnings := wizard.ResetInstance(srv)
-
+	progress := &wizard.ResetProgress{}
+	jobID := a.newJobID()
 	a.mu.Lock()
-	delete(a.localSessions, srv.ID)
-	for key := range a.remoteSessions {
-		callerID, calleeID, _ := strings.Cut(key, "|")
-		if callerID == srv.ID || calleeID == srv.ID {
-			delete(a.remoteSessions, key)
-		}
-	}
+	a.resetJobs[jobID] = progress
 	a.mu.Unlock()
 
-	// The peer side's own trunk (a separate PBXware object on a separate
-	// instance) isn't touched by resetting srv — only srv's "connected to
-	// X" bookkeeping is stale now, so just clear that reference rather
-	// than deleting anything real on the peer.
-	if srv.PeerServerID != "" {
-		if peer := a.store.GetServer(srv.PeerServerID); peer != nil {
-			peer.PeerServerID = ""
-			_ = a.store.UpdateServer(peer)
-		}
-	}
+	go func() {
+		wizard.ResetInstance(srv, progress)
 
-	if err := a.store.RemoveServer(srv.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		a.mu.Lock()
+		delete(a.localSessions, srv.ID)
+		for key := range a.remoteSessions {
+			callerID, calleeID, _ := strings.Cut(key, "|")
+			if callerID == srv.ID || calleeID == srv.ID {
+				delete(a.remoteSessions, key)
+			}
+		}
+		a.mu.Unlock()
+
+		// The peer side's own trunk (a separate PBXware object on a
+		// separate instance) isn't touched by resetting srv — only srv's
+		// "connected to X" bookkeeping is stale now, so just clear that
+		// reference rather than deleting anything real on the peer.
+		if srv.PeerServerID != "" {
+			if peer := a.store.GetServer(srv.PeerServerID); peer != nil {
+				peer.PeerServerID = ""
+				_ = a.store.UpdateServer(peer)
+			}
+		}
+
+		if err := a.store.RemoveServer(srv.ID); err != nil {
+			progress.AppendWarning(fmt.Sprintf("removing from SwarmDialer: %v", err))
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]string{"job_id": jobID})
+}
+
+func (a *app) handleResetInstanceStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := r.URL.Query().Get("job_id")
+	a.mu.Lock()
+	progress, ok := a.resetJobs[jobID]
+	a.mu.Unlock()
+	if !ok {
+		http.Error(w, "unknown job_id", http.StatusNotFound)
 		return
 	}
-
-	resp := map[string]any{"success": true}
-	if len(warnings) > 0 {
-		resp["warning"] = strings.Join(warnings, "; ")
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, progress.Snapshot())
 }
 
 // handleResetSwarmDialer deletes the persisted config file and restarts

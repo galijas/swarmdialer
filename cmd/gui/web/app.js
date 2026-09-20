@@ -411,6 +411,34 @@ async function refreshSettingsTab() {
   });
 }
 
+// Starts a reset-instance job and polls it to completion, updating
+// statusEl live with whatever step is currently running (e.g. "deleting
+// tenant 18", "waiting for tenant 18 to finish deleting (can take
+// several minutes)") — a Multi-Tenant reset can take several minutes, so
+// showing only a static "resetting..." message the whole time leaves the
+// user with no way to tell it's still working versus stuck. label, if
+// given, prefixes every status line (used by resetAll to show which
+// instance is currently being reset).
+function runResetInstanceJob(serverID, statusEl, label) {
+  const prefix = label ? `${label}: ` : '';
+  return api('/api/settings/reset-instance', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({server_id: serverID}),
+  }).then(({job_id}) => new Promise((resolve) => {
+    poll(() => api('/api/settings/reset-instance/status?job_id=' + job_id), 1500, (p) => {
+      if (!p.done) {
+        statusEl.textContent = prefix + (p.message || 'working...');
+        statusEl.className = 'status-line';
+        return false;
+      }
+      statusEl.textContent = p.warning ? `${prefix}done, with warnings: ${p.warning}` : `${prefix}done.`;
+      statusEl.className = p.warning ? 'status-line error' : 'status-line';
+      resolve(p);
+      return true;
+    });
+  }));
+}
+
 async function resetInstance(index) {
   const btn = document.getElementById(`reset-instance-${index + 1}-btn`);
   const serverID = btn.dataset.serverId;
@@ -419,15 +447,10 @@ async function resetInstance(index) {
   if (!confirm(`Reset ${name}? This deletes everything SwarmDialer created on that PBXware instance (trunk, tenant/package or extensions) and cannot be undone.`)) return;
 
   const statusEl = document.getElementById('reset-instance-status');
-  statusEl.textContent = `Resetting ${name}... (tenant deletion can take several minutes)`;
+  statusEl.textContent = 'Starting...';
   statusEl.className = 'status-line';
   try {
-    const result = await api('/api/settings/reset-instance', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({server_id: serverID}),
-    });
-    statusEl.textContent = result.warning ? `Done, with warnings: ${result.warning}` : `${name} reset.`;
-    statusEl.className = result.warning ? 'status-line error' : 'status-line';
+    await runResetInstanceJob(serverID, statusEl, name);
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
@@ -456,11 +479,7 @@ async function resetAll() {
   try {
     const {servers} = await api('/api/servers');
     for (const s of servers) {
-      statusEl.textContent = `Resetting ${s.name}... (tenant deletion can take several minutes)`;
-      await api('/api/settings/reset-instance', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({server_id: s.id}),
-      });
+      await runResetInstanceJob(s.id, statusEl, s.name);
     }
     statusEl.textContent = 'Resetting SwarmDialer...';
     await api('/api/settings/reset-swarmdialer', {method: 'POST'});

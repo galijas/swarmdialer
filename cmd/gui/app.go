@@ -38,6 +38,7 @@ type app struct {
 	mu             sync.Mutex
 	provisionJobs  map[string]*wizard.ProvisionProgress
 	connectJobs    map[string]*wizard.ConnectProgress
+	resetJobs      map[string]*wizard.ResetProgress
 	localSessions  map[string]*orchestrator.Session // server ID -> session
 	remoteSessions map[string]*orchestrator.Session // "callerID|calleeID" -> session
 	nextJobID      uint64
@@ -55,6 +56,7 @@ func newApp(ctx context.Context, configPath string) (*app, error) {
 		configPath:     configPath,
 		provisionJobs:  make(map[string]*wizard.ProvisionProgress),
 		connectJobs:    make(map[string]*wizard.ConnectProgress),
+		resetJobs:      make(map[string]*wizard.ResetProgress),
 		localSessions:  make(map[string]*orchestrator.Session),
 		remoteSessions: make(map[string]*orchestrator.Session),
 	}, nil
@@ -94,6 +96,7 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dial", a.handleDial)
 	mux.HandleFunc("/api/status", a.handleStatus)
 	mux.HandleFunc("/api/settings/reset-instance", a.handleResetInstance)
+	mux.HandleFunc("/api/settings/reset-instance/status", a.handleResetInstanceStatus)
 	mux.HandleFunc("/api/settings/reset-swarmdialer", a.handleResetSwarmDialer)
 	mux.Handle("/ws/status", a.sessionWSHandler())
 }
