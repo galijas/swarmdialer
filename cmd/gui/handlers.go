@@ -325,6 +325,50 @@ func (a *app) allocPortRangeLocked(n int) int {
 	return base
 }
 
+// existingSessionFor is sessionFor without the lazy-create side effect —
+// used by handleStop, which should do nothing (not silently spin up a
+// brand new session/registration) when there's no live session for that
+// dialer to stop.
+func (a *app) existingSessionFor(section, serverID, peerServerID string) *orchestrator.Session {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if section == "remote" {
+		return a.remoteSessions[serverID+"|"+peerServerID]
+	}
+	return a.localSessions[serverID]
+}
+
+// --- Dialing: stop ---
+
+type stopRequest struct {
+	Section      string `json:"section"`
+	ServerID     string `json:"server_id"`
+	PeerServerID string `json:"peer_server_id"`
+}
+
+// handleStop cancels every call the targeted dialer currently has in
+// flight (queued/ramping or already answered — see Session.Stop) without
+// tearing down the session, so the dashboard's +N buttons keep working
+// normally afterward.
+func (a *app) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req stopRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	sess := a.existingSessionFor(req.Section, req.ServerID, req.PeerServerID)
+	if sess == nil {
+		writeJSON(w, http.StatusOK, map[string]bool{"stopped": false})
+		return
+	}
+	sess.Stop()
+	writeJSON(w, http.StatusOK, map[string]bool{"stopped": true})
+}
+
 func toEndpoints(exts []pbxware.ProvisionedExtension) []sipua.Endpoint {
 	out := make([]sipua.Endpoint, len(exts))
 	for i, e := range exts {

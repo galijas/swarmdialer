@@ -94,6 +94,7 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/wizard/connect/status", a.handleConnectStatus)
 	mux.HandleFunc("/api/servers", a.handleServers)
 	mux.HandleFunc("/api/dial", a.handleDial)
+	mux.HandleFunc("/api/stop", a.handleStop)
 	mux.HandleFunc("/api/status", a.handleStatus)
 	mux.HandleFunc("/api/settings/reset-instance", a.handleResetInstance)
 	mux.HandleFunc("/api/settings/reset-instance/status", a.handleResetInstanceStatus)

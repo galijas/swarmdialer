@@ -266,20 +266,29 @@ function populateSelect(id, options) {
 
 // ---------- Dashboard: dialing ----------
 
+// Resolves which server (and, for remote, which peer) a dialer section is
+// currently pointed at — shared by confirmDial and confirmStop so they
+// always agree on which session a click applies to.
+function dialerTarget(section) {
+  if (section === 'remote') {
+    const pairValue = document.getElementById('remote-pair-select').value;
+    if (!pairValue) { logLine('Error: no connected server pair selected.', true); return null; }
+    const [serverID, peerServerID] = pairValue.split(':');
+    return {serverID, peerServerID};
+  }
+  const serverID = document.getElementById('local-server-select').value;
+  if (!serverID) { logLine('Error: no server selected.', true); return null; }
+  return {serverID, peerServerID: undefined};
+}
+
 function confirmDial(section, count) {
   if (!confirm(`Start ${count} additional ${section} call(s)?`)) return;
   const duration = parseInt(document.getElementById(section + '-duration').value, 10);
   const useRTP = document.getElementById(section + '-rtp').checked;
 
-  let serverID, peerServerID;
-  if (section === 'remote') {
-    const pairValue = document.getElementById('remote-pair-select').value;
-    if (!pairValue) { logLine('Error: no connected server pair selected.', true); return; }
-    [serverID, peerServerID] = pairValue.split(':');
-  } else {
-    serverID = document.getElementById('local-server-select').value;
-    if (!serverID) { logLine('Error: no server selected.', true); return; }
-  }
+  const target = dialerTarget(section);
+  if (!target) return;
+  const {serverID, peerServerID} = target;
 
   api('/api/dial', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -289,6 +298,20 @@ function confirmDial(section, count) {
     }),
   }).then(r => {
     logLine(`Requested +${count} ${section} calls — ${r.started} started (pool availability may limit this).`);
+  }).catch(e => logLine('Error: ' + e.message, true));
+}
+
+function confirmStop(section) {
+  const target = dialerTarget(section);
+  if (!target) return;
+  if (!confirm(`Stop ALL ${section} calls? This hangs up everything currently active and cancels anything still queued.`)) return;
+  const {serverID, peerServerID} = target;
+
+  api('/api/stop', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({section, server_id: serverID, peer_server_id: peerServerID}),
+  }).then(r => {
+    logLine(r.stopped ? `Stopped all ${section} calls.` : `No active ${section} session to stop.`);
   }).catch(e => logLine('Error: ' + e.message, true));
 }
 

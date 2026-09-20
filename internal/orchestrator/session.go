@@ -211,6 +211,14 @@ type Session struct {
 	dialNumberFor func(calleeAOR string) string
 	calls         map[string]*activeCall
 	events        []Event
+	// stopCh is closed by Stop to cancel every call currently in flight
+	// (queued/ramping or already answered) without tearing down the
+	// session itself; Stop immediately replaces it with a fresh channel so
+	// a later AddCalls works normally. AddCalls snapshots this once per
+	// batch (under mu) and threads it through to runCall, rather than
+	// having goroutines read s.stopCh directly, so a Stop that happens
+	// mid-batch can't race a goroutine reading the field.
+	stopCh chan struct{}
 
 	nextEventSeq       atomic.Uint64
 	nextCallID         atomic.Uint64
@@ -235,6 +243,7 @@ func NewSession(ctx context.Context, cfg SessionConfig, endpoints []sipua.Endpoi
 		callerPool:  p,
 		calleePool:  p,
 		calls:       make(map[string]*activeCall),
+		stopCh:      make(chan struct{}),
 	}, nil
 }
 
@@ -276,7 +285,8 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 			}
 			return calleeAOR
 		},
-		calls: make(map[string]*activeCall),
+		calls:  make(map[string]*activeCall),
+		stopCh: make(chan struct{}),
 	}, nil
 }
 
@@ -286,12 +296,17 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 // are available, it starts as many as it can and returns that count (not
 // an error — a partial add is a normal, expected outcome the caller/GUI
 // should just report). Each call automatically hangs up and returns its
-// extensions to the pool after callDuration.
+// extensions to the pool after callDuration, or immediately if Stop is
+// called first.
 func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, sendMedia bool) (started int) {
 	pairs := s.reservePairs(n)
 	if len(pairs) == 0 {
 		return 0
 	}
+
+	s.mu.Lock()
+	stopCh := s.stopCh
+	s.mu.Unlock()
 
 	var wg sync.WaitGroup
 	var batchAnswered, batchFailed atomic.Uint64
@@ -307,8 +322,13 @@ func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, send
 				s.totalCallsFailed.Add(1)
 				batchFailed.Add(1)
 				return
+			case <-stopCh:
+				s.release(caller, callee)
+				s.totalCallsFailed.Add(1)
+				batchFailed.Add(1)
+				return
 			}
-			if s.runCall(caller, callee, callDuration, sendMedia) {
+			if s.runCall(caller, callee, callDuration, sendMedia, stopCh) {
 				batchAnswered.Add(1)
 			} else {
 				batchFailed.Add(1)
@@ -407,9 +427,10 @@ func (s *Session) release(caller, callee string) {
 	s.calleePool.available[callee] = true
 }
 
-// runCall places one call and blocks until it ends, returning whether it
+// runCall places one call and blocks until it ends (naturally, via ctx
+// cancellation, or via stopCh being closed by Stop), returning whether it
 // was answered (for the caller's batch-completion tally — see AddCalls).
-func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool) bool {
+func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool, stopCh <-chan struct{}) bool {
 	s.mu.Lock()
 	caller := s.callerPool.phones[callerAOR]
 	dialDestination, sipDomain := s.callerPool.dialDestination, s.callerPool.sipDomain
@@ -439,6 +460,7 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 
 	select {
 	case <-s.ctx.Done():
+	case <-stopCh:
 	case <-time.After(callDuration):
 	}
 
@@ -513,6 +535,21 @@ func countTrue(m map[string]bool) int {
 		}
 	}
 	return n
+}
+
+// Stop cancels every call this session currently has in flight — both
+// ones still waiting out their ramp delay (never dialed at all) and ones
+// already answered (hung up immediately, via the exact same code path a
+// naturally-expiring call takes — see runCall's select) — without
+// tearing down the session itself: phones stay registered, and a later
+// AddCalls works normally, using a freshly-made stop channel so it isn't
+// immediately canceled too.
+func (s *Session) Stop() {
+	s.mu.Lock()
+	oldStop := s.stopCh
+	s.stopCh = make(chan struct{})
+	s.mu.Unlock()
+	close(oldStop)
 }
 
 // Close hangs up every active call and shuts down every phone.
