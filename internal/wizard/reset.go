@@ -90,20 +90,25 @@ func ResetInstance(srv *store.Server, progress *ResetProgress) {
 	if isMultiTenantEdition(srv.Edition) {
 		if srv.TenantID != 0 {
 			progress.set(func() { progress.message = fmt.Sprintf("deleting tenant %d", srv.TenantID) })
+			// tenant.delete frequently outlasts the 30s HTTP client timeout
+			// even when it succeeds server-side — the same behavior already
+			// documented on AddTenant for tenant.add. A timeout/transport
+			// error here does NOT mean the tenant is still there, so it's
+			// recorded as a warning but doesn't skip the wait-for-gone
+			// check below — that check is the only way to find out what
+			// actually happened, and skipping it (as an earlier version of
+			// this function did) meant the package delete right after would
+			// run while the tenant might still be present, failing with
+			// "Cannot delete package that is currently assigned to
+			// tenants" instead of the real problem being visible.
 			if err := client.DeleteTenant(srv.TenantID); err != nil {
 				warnings = append(warnings, fmt.Sprintf("deleting tenant %d: %v", srv.TenantID, err))
-			} else {
-				progress.set(func() {
-					progress.message = fmt.Sprintf("waiting for tenant %d to finish deleting (can take several minutes)", srv.TenantID)
-				})
-				// Tenant delete was accepted but hasn't finished — still try
-				// the package below (best-effort), but flag it since
-				// deleting the package out from under a still-deleting
-				// tenant could otherwise fail silently or leave things
-				// half-cleaned.
-				if err := client.WaitForTenantGone(srv.TenantID, resetTenantGoneWait); err != nil {
-					warnings = append(warnings, fmt.Sprintf("waiting for tenant %d to finish deleting: %v", srv.TenantID, err))
-				}
+			}
+			progress.set(func() {
+				progress.message = fmt.Sprintf("waiting for tenant %d to finish deleting (can take several minutes)", srv.TenantID)
+			})
+			if err := client.WaitForTenantGone(srv.TenantID, resetTenantGoneWait); err != nil {
+				warnings = append(warnings, fmt.Sprintf("waiting for tenant %d to finish deleting: %v", srv.TenantID, err))
 			}
 		}
 		progress.set(func() { progress.message = "deleting shared tenant package" })
