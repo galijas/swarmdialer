@@ -173,6 +173,12 @@ button.btn.secondary:hover { border-color: var(--accent); color: var(--accent); 
 button.btn.danger { background: var(--danger); color: #fff; }
 button.btn.danger:hover { background: #ff7a8f; }
 
+/* Stop All — same blue as the Live Status "Total RTP packets" stat, so it
+   reads as a distinct, calmer control from the load-generating (amber/red)
+   dialer buttons next to it. */
+button.btn.stop { background: var(--local); color: #06263f; }
+button.btn.stop:hover { background: #7ec2ff; }
+
 .increment-row {
   display: flex;
   gap: 8px;
