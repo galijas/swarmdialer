@@ -52,6 +52,9 @@ function poll(fn, intervalMs, untilDone) {
 
 async function testConnection(step) {
   const prefix = 'c' + step;
+  const btn = document.getElementById(prefix + '-next-btn');
+  if (btn.disabled) return; // guards against a double-click
+  btn.disabled = true;
   const statusEl = document.getElementById(prefix + '-status');
   statusEl.textContent = 'Testing connection...';
   statusEl.className = 'status-line';
@@ -76,15 +79,21 @@ async function testConnection(step) {
 
     window['pending' + step] = req; // stash for provision() to reuse
     showStep('step-provision-' + step);
+    // Left disabled — this step is done and showStep moved us past it;
+    // there's no way back to re-click it.
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
+    btn.disabled = false;
   }
 }
 
 // ---------- Wizard: provision ----------
 
 async function provision(step) {
+  const btn = document.getElementById('p' + step + '-create-btn');
+  if (btn.disabled) return; // guards against a double-click firing two overlapping provisioning jobs
+  btn.disabled = true;
   const pending = window['pending' + step];
   const statusEl = document.getElementById('p' + step + '-status');
   const barWrap = document.getElementById('p' + step + '-progress-bar');
@@ -120,10 +129,12 @@ async function provision(step) {
       if (p.error) {
         statusEl.textContent = 'Error: ' + p.error;
         statusEl.className = 'status-line error';
+        btn.disabled = false;
         return true;
       }
       if (p.done) {
         statusEl.textContent = `Done — ${p.created} extensions created.`;
+        // Left disabled — this step is done and showStep moved us past it.
         if (step === 1) {
           wizardState.server1 = req;
           showStep('step-add-another');
@@ -138,6 +149,7 @@ async function provision(step) {
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
+    btn.disabled = false;
   }
 }
 
@@ -153,22 +165,27 @@ async function finishWizard() {
 // ---------- Wizard: connect trunk + DIDs ----------
 
 async function connectServers() {
+  const btn = document.getElementById('ct-create-btn');
+  if (btn.disabled) return; // guards against a double-click firing two overlapping connect jobs
+  btn.disabled = true;
+
   const statusEl = document.getElementById('ct-status');
   const barWrap = document.getElementById('ct-progress-bar');
   const bar = barWrap.querySelector('div');
   barWrap.classList.remove('hidden');
   statusEl.textContent = 'Fetching server list...';
 
-  const {servers} = await api('/api/servers');
-  if (servers.length < 2) {
-    statusEl.textContent = 'Error: need two provisioned servers first.';
-    statusEl.className = 'status-line error';
-    return;
-  }
-  const server1 = servers[servers.length - 2];
-  const server2 = servers[servers.length - 1];
-
   try {
+    const {servers} = await api('/api/servers');
+    if (servers.length < 2) {
+      statusEl.textContent = 'Error: need two provisioned servers first.';
+      statusEl.className = 'status-line error';
+      btn.disabled = false;
+      return;
+    }
+    const server1 = servers[servers.length - 2];
+    const server2 = servers[servers.length - 1];
+
     const {job_id} = await api('/api/wizard/connect', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({server1_id: server1.id, server2_id: server2.id}),
@@ -181,10 +198,12 @@ async function connectServers() {
       if (p.error) {
         statusEl.textContent = 'Error: ' + p.error;
         statusEl.className = 'status-line error';
+        btn.disabled = false;
         return true;
       }
       if (p.done) {
         statusEl.textContent = 'Trunk and DIDs created.';
+        // Left disabled — this step is done; "Complete Setup" takes over.
         document.getElementById('ct-complete-btn').classList.remove('hidden');
         return true;
       }
@@ -193,6 +212,7 @@ async function connectServers() {
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
+    btn.disabled = false;
   }
 }
 

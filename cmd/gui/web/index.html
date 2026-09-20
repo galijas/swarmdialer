@@ -33,7 +33,7 @@
       <div class="form-row"><label>Base URL (e.g. https://10.1.100.208)</label><input id="c1-url" placeholder="https://..."></div>
       <div class="form-row"><label>API key</label><input id="c1-key" placeholder="apikey"></div>
     </div>
-    <button class="btn" onclick="testConnection(1)">Next</button>
+    <button class="btn" id="c1-next-btn" onclick="testConnection(1)">Next</button>
     <div class="status-line" id="c1-status"></div>
   </div>
 
@@ -49,7 +49,7 @@
       <div class="form-row"><label>Number of extensions (max 2000)</label><input id="p1-ext-count" type="number" value="10" max="2000" min="2"></div>
     </div>
     <p class="status-line">Note: make sure your PBXware license allows creating this many extensions (see the Extensions limit shown in Step 1).</p>
-    <button class="btn" onclick="provision(1)">Create</button>
+    <button class="btn" id="p1-create-btn" onclick="provision(1)">Create</button>
     <div class="progress-bar hidden" id="p1-progress-bar"><div style="width:0%"></div></div>
     <div class="status-line" id="p1-status"></div>
   </div>
@@ -70,7 +70,7 @@
       <div class="form-row"><label>Base URL</label><input id="c2-url" placeholder="https://..."></div>
       <div class="form-row"><label>API key</label><input id="c2-key" placeholder="apikey"></div>
     </div>
-    <button class="btn" onclick="testConnection(2)">Next</button>
+    <button class="btn" id="c2-next-btn" onclick="testConnection(2)">Next</button>
     <div class="status-line" id="c2-status"></div>
   </div>
 
@@ -85,7 +85,7 @@
     <div class="form-grid">
       <div class="form-row"><label>Number of extensions (max 2000)</label><input id="p2-ext-count" type="number" value="10" max="2000" min="2"></div>
     </div>
-    <button class="btn" onclick="provision(2)">Create</button>
+    <button class="btn" id="p2-create-btn" onclick="provision(2)">Create</button>
     <div class="progress-bar hidden" id="p2-progress-bar"><div style="width:0%"></div></div>
     <div class="status-line" id="p2-status"></div>
   </div>
@@ -94,7 +94,7 @@
   <div class="panel hidden" id="step-connect-trunk">
     <h2>Step 6: Connect Servers (Trunk &amp; DIDs)</h2>
     <p class="status-line">Creates a SIP trunk between the two instances and one DID per extension, so either side can dial the other's extensions. This includes a settling wait after creation — it can take a couple of minutes.</p>
-    <button class="btn" onclick="connectServers()">Create Trunk &amp; DIDs</button>
+    <button class="btn" id="ct-create-btn" onclick="connectServers()">Create Trunk &amp; DIDs</button>
     <div class="progress-bar hidden" id="ct-progress-bar"><div style="width:0%"></div></div>
     <div class="status-line" id="ct-status"></div>
     <button class="btn hidden" id="ct-complete-btn" onclick="finishWizard()">Complete Setup</button>
