@@ -74,6 +74,8 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	}
 	userA, userB := "swarm"+a.ID, "swarm"+b.ID
 
+	// Peer trunk credentials use a fixed peer_username ("admin") rather
+	// than a cross-referenced generated one — see AddTrunk.
 	providerIDA, err := clientA.GenericSIPProviderID(1)
 	if err != nil {
 		progress.set(func() { progress.done = true; progress.err = err.Error() })
@@ -91,7 +93,7 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	trunkA, err := clientA.AddTrunk(pbxware.TrunkParams{
 		Server: 1, Name: "SwarmDialer-to-" + b.Name, ProviderID: providerIDA,
 		Host: aHost, Username: userA, Secret: credA,
-		PeerHost: bHost, PeerUsername: userB, PeerSecret: credB,
+		PeerHost: bHost, PeerSecret: credB,
 		Country: "869", National: "1", International: "011",
 	})
 	if err != nil {
@@ -102,7 +104,7 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	trunkB, err := clientB.AddTrunk(pbxware.TrunkParams{
 		Server: 1, Name: "SwarmDialer-to-" + a.Name, ProviderID: providerIDB,
 		Host: bHost, Username: userB, Secret: credB,
-		PeerHost: aHost, PeerUsername: userA, PeerSecret: credA,
+		PeerHost: aHost, PeerSecret: credA,
 		Country: "869", National: "1", International: "011",
 	})
 	if err != nil {
@@ -166,7 +168,7 @@ func addDIDsFor(client *pbxware.Client, srv *store.Server, trunkID int, progress
 	}
 	dids := make([]store.DIDMapping, 0, len(srv.Extensions))
 	for _, ext := range srv.Extensions {
-		did := fmt.Sprintf("9%s%s", srv.TenantCode, ext.Ext)
+		did := didFor10DigitRoute(srv.TenantCode, ext.Ext)
 		if _, err := client.AddDID(pbxware.DIDParams{
 			Server: tenantID, TrunkID: trunkID, DID: did, Destination: ext.Ext,
 		}); err != nil {
@@ -177,6 +179,29 @@ func addDIDsFor(client *pbxware.Client, srv *store.Server, trunkID int, progress
 	}
 	srv.DIDs = dids
 	return nil
+}
+
+// didFor10DigitRoute builds a DID matching PBXware's built-in default
+// "10-digit dialing" route (Start digits: Any, Required Length: 10,
+// Regex: [2-9][0-8][0-9][2-9]) — a dialed number has to satisfy some
+// configured Route before PBXware will send it out over a trunk at all,
+// and creating a custom Route isn't possible through the public API (it's
+// a session-authenticated admin-panel-only feature — see PROJECT_STATE.md
+// for how this was confirmed), so DIDs are shaped to fit an existing
+// default route instead of needing a new one.
+//
+// Positions 1, 2, and 4 are pinned to '5' (valid under all three of the
+// route's character classes: [2-9], [0-8], [2-9]); the other 7 digits
+// (position 3, then 5-10) are free and carry tenantCode+ext — 3+4 digits,
+// matching the wizard's fixed tenant-code range (200-999) and ext_length
+// (4) exactly. tenantCode is "" for non-Multi-Tenant editions, treated as
+// "000" so the encoding is uniform either way.
+func didFor10DigitRoute(tenantCode, ext string) string {
+	v := tenantCode + ext
+	for len(v) < 7 {
+		v = "0" + v
+	}
+	return "55" + v[:1] + "5" + v[1:]
 }
 
 func isMultiTenantEdition(edition string) bool {

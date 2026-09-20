@@ -56,11 +56,10 @@ func (c *Client) GenericSIPProviderID(tenantID int) (int, error) {
 
 // TrunkParams holds the fields needed to create a SIP trunk between two
 // PBXware instances. Host/Username/Secret describe this instance's side;
-// PeerHost/PeerUsername/PeerSecret describe the far side — the same
-// Username/Secret pair must be used as both this trunk's own credentials
-// and the peer trunk's Peer* credentials, symmetrically, for the two sides
-// to authenticate each other. See docs/pbxware_api_reference.md's Trunks
-// section for the full field reference.
+// PeerHost/PeerSecret describe the far side. PeerHost also doubles as the
+// trunk's "Incoming IP addresses" ACL (from_ipaddr) — see AddTrunk. See
+// docs/pbxware_api_reference.md's Trunks section for the full field
+// reference.
 type TrunkParams struct {
 	Server        int // Tenant/Server ID
 	Name          string
@@ -69,7 +68,6 @@ type TrunkParams struct {
 	Username      string // this side's auth username
 	Secret        string // this side's auth secret
 	PeerHost      string // far side's host
-	PeerUsername  string // far side's auth username
 	PeerSecret    string // far side's auth secret
 	Country       string
 	National      string
@@ -84,12 +82,25 @@ type TrunkResult struct {
 // AddTrunk creates a SIP trunk. Codec/DTMF/etc. are fixed to sensible
 // defaults for load testing (G.711, RFC2833 DTMF) — SwarmDialer doesn't
 // need this to be configurable beyond what TrunkParams exposes.
+//
+// type=peer + passthru_mode=yes + peer_username="admin" (a fixed literal,
+// not a per-deployment generated value) + from_ipaddr=PeerHost +
+// insecure=very + register=0 (Not Required), replacing an earlier
+// type=friend trunk with generated/cross-referenced peer credentials and
+// insecure=port,invite: that setup let calls signal as answered without
+// actually reaching the far instance (PBXware playing its own local
+// "destination_not_recognized" announcement, which Asterisk answers
+// before playing — a false positive from SwarmDialer's signaling-only
+// point of view). incominglimit/outgoinglimit raised 600 -> 1000 as part
+// of the same fix. Confirmed working live 2026-09-20 with real
+// bidirectional RTP between the two instances (not just local signaling).
 func (c *Client) AddTrunk(p TrunkParams) (TrunkResult, error) {
 	params := url.Values{
 		"server":        {strconv.Itoa(p.Server)},
 		"name":          {p.Name},
 		"provider_id":   {strconv.Itoa(p.ProviderID)},
-		"type":          {"friend"},
+		"type":          {"peer"},
+		"passthru_mode": {"yes"},
 		"dtmfmode":      {"rfc2833"},
 		"status":        {"active"},
 		"country":       {p.Country},
@@ -100,12 +111,14 @@ func (c *Client) AddTrunk(p TrunkParams) (TrunkResult, error) {
 		"username":      {p.Username},
 		"secret":        {p.Secret},
 		"peer_host":     {p.PeerHost},
-		"peer_username": {p.PeerUsername},
+		"peer_username": {"admin"},
 		"peer_secret":   {p.PeerSecret},
-		"insecure":      {"port,invite"},
+		"from_ipaddr":   {p.PeerHost},
+		"insecure":      {"very"},
+		"register":      {"0"},
 		"looserouting":  {"yes"},
-		"incominglimit": {"600"},
-		"outgoinglimit": {"600"},
+		"incominglimit": {"1000"},
+		"outgoinglimit": {"1000"},
 		"codecs":        {"ulaw,alaw"},
 		"codecs_ptime":  {"20,20"}, // one ptime per codec — must match codecs' item count
 	}
@@ -149,6 +162,16 @@ func (c *Client) SetTenantDefaultTrunk(tenantID, trunkID int) error {
 		"tenant":        {strconv.Itoa(tenantID)},
 		"trunks":        {strconv.Itoa(trunkID)},
 		"primary_trunk": {strconv.Itoa(trunkID)},
+	})
+	return err
+}
+
+// DeleteTrunk deletes a trunk — trunks are system-level objects (server=1)
+// even in Tenant Mode, same as AddTrunk.
+func (c *Client) DeleteTrunk(server, trunkID int) error {
+	_, err := c.call("pbxware.trunk.delete", url.Values{
+		"server": {strconv.Itoa(server)},
+		"id":     {strconv.Itoa(trunkID)},
 	})
 	return err
 }

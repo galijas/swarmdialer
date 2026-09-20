@@ -12,11 +12,16 @@ let wizardState = {
 function showTab(name) {
   document.getElementById('tab-wizard').classList.toggle('hidden', name !== 'wizard');
   document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
+  document.getElementById('tab-settings').classList.toggle('hidden', name !== 'settings');
   document.getElementById('tab-btn-wizard').classList.toggle('active', name === 'wizard');
   document.getElementById('tab-btn-dashboard').classList.toggle('active', name === 'dashboard');
+  document.getElementById('tab-btn-settings').classList.toggle('active', name === 'settings');
   if (name === 'dashboard') {
     refreshServerList();
     connectStatusSockets();
+  }
+  if (name === 'settings') {
+    refreshSettingsTab();
   }
 }
 
@@ -385,6 +390,103 @@ function logLine(html, isError) {
   row.innerHTML = `[${time}] ${html}`;
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
+}
+
+// ---------- Settings: reset ----------
+
+async function refreshSettingsTab() {
+  const {servers} = await api('/api/servers');
+  [0, 1].forEach(i => {
+    const btn = document.getElementById(`reset-instance-${i + 1}-btn`);
+    const srv = servers[i];
+    if (srv) {
+      btn.disabled = false;
+      btn.textContent = `Reset ${srv.name}`;
+      btn.dataset.serverId = srv.id;
+    } else {
+      btn.disabled = true;
+      btn.textContent = 'Reset —';
+      delete btn.dataset.serverId;
+    }
+  });
+}
+
+async function resetInstance(index) {
+  const btn = document.getElementById(`reset-instance-${index + 1}-btn`);
+  const serverID = btn.dataset.serverId;
+  if (!serverID) return;
+  const name = btn.textContent.replace('Reset ', '');
+  if (!confirm(`Reset ${name}? This deletes everything SwarmDialer created on that PBXware instance (trunk, tenant/package or extensions) and cannot be undone.`)) return;
+
+  const statusEl = document.getElementById('reset-instance-status');
+  statusEl.textContent = `Resetting ${name}... (tenant deletion can take several minutes)`;
+  statusEl.className = 'status-line';
+  try {
+    const result = await api('/api/settings/reset-instance', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({server_id: serverID}),
+    });
+    statusEl.textContent = result.warning ? `Done, with warnings: ${result.warning}` : `${name} reset.`;
+    statusEl.className = result.warning ? 'status-line error' : 'status-line';
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+  refreshSettingsTab();
+}
+
+async function resetSwarmDialer() {
+  if (!confirm('Reset SwarmDialer to default? This deletes SwarmDialer\'s saved configuration and restarts the GUI. It does NOT touch anything on PBXware.')) return;
+  const statusEl = document.getElementById('reset-swarmdialer-status');
+  statusEl.textContent = 'Resetting and restarting...';
+  statusEl.className = 'status-line';
+  try {
+    await api('/api/settings/reset-swarmdialer', {method: 'POST'});
+  } catch (e) {
+    // A dropped connection here is expected — the process restarts right
+    // after responding.
+  }
+  await waitForRestart(statusEl);
+}
+
+async function resetAll() {
+  if (!confirm('Reset ALL connected instances and SwarmDialer itself? This cannot be undone.')) return;
+  const statusEl = document.getElementById('reset-all-status');
+  statusEl.className = 'status-line';
+  try {
+    const {servers} = await api('/api/servers');
+    for (const s of servers) {
+      statusEl.textContent = `Resetting ${s.name}... (tenant deletion can take several minutes)`;
+      await api('/api/settings/reset-instance', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({server_id: s.id}),
+      });
+    }
+    statusEl.textContent = 'Resetting SwarmDialer...';
+    await api('/api/settings/reset-swarmdialer', {method: 'POST'});
+  } catch (e) {
+    // ignore — a dropped connection is expected once the process restarts
+  }
+  await waitForRestart(statusEl);
+}
+
+// Polls /api/servers until the just-restarted process answers again (it
+// briefly refuses connections while the exec-restart is in flight), then
+// reloads so the UI reflects the now-empty config from a clean slate.
+async function waitForRestart(statusEl) {
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      await api('/api/servers');
+      statusEl.textContent = 'Done — SwarmDialer restarted.';
+      setTimeout(() => location.reload(), 500);
+      return;
+    } catch (e) {
+      // still restarting
+    }
+  }
+  statusEl.textContent = 'Restart is taking longer than expected — refresh the page manually.';
+  statusEl.className = 'status-line error';
 }
 
 // ---------- Init ----------

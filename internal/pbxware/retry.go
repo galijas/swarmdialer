@@ -104,6 +104,35 @@ func (c *Client) WaitForTenant(tenantID int, maxWait time.Duration) error {
 	}
 }
 
+// WaitForTenantGone blocks until tenantID no longer appears in
+// ListTenants, or maxWait elapses — tenant deletion is just as slow as
+// tenant creation (see WaitForTenant) on this system, and a caller that
+// moves on immediately (e.g. to delete the shared package the tenant
+// referenced) risks acting while the tenant delete is still in flight.
+func (c *Client) WaitForTenantGone(tenantID int, maxWait time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	for {
+		tenants, err := c.ListTenants()
+		if err != nil {
+			return err
+		}
+		gone := true
+		for _, t := range tenants {
+			if t.ID == tenantID {
+				gone = false
+				break
+			}
+		}
+		if gone {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("tenant %d still present after %s", tenantID, maxWait)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
 // secretChars matches PBXware's allowed character set for extension secrets:
 // letters, digits, and one of %*!_-
 const secretUpper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

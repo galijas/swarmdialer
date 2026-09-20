@@ -5,9 +5,12 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"swarmdialer/internal/orchestrator"
@@ -28,8 +31,9 @@ var webFS embed.FS
 // be a separate local session per server and a separate remote session
 // per connected pair, all live at once. See handlers.go's sessionFor.
 type app struct {
-	ctx   context.Context
-	store *store.Store
+	ctx        context.Context
+	store      *store.Store
+	configPath string // see handleResetSwarmDialer
 
 	mu             sync.Mutex
 	provisionJobs  map[string]*wizard.ProvisionProgress
@@ -48,6 +52,7 @@ func newApp(ctx context.Context, configPath string) (*app, error) {
 	return &app{
 		ctx:            ctx,
 		store:          st,
+		configPath:     configPath,
 		provisionJobs:  make(map[string]*wizard.ProvisionProgress),
 		connectJobs:    make(map[string]*wizard.ConnectProgress),
 		localSessions:  make(map[string]*orchestrator.Session),
@@ -88,7 +93,29 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/servers", a.handleServers)
 	mux.HandleFunc("/api/dial", a.handleDial)
 	mux.HandleFunc("/api/status", a.handleStatus)
+	mux.HandleFunc("/api/settings/reset-instance", a.handleResetInstance)
+	mux.HandleFunc("/api/settings/reset-swarmdialer", a.handleResetSwarmDialer)
 	mux.Handle("/ws/status", a.sessionWSHandler())
+}
+
+// restartProcess replaces the current process image with a fresh
+// invocation of itself (same binary, same args, same environment) —
+// used by handleResetSwarmDialer so "reset to default" actually clears
+// in-memory state (sessions, port allocations, job maps) rather than just
+// the on-disk config, without needing a supervisor (systemd, etc.) to
+// bounce the process from outside. Go's listener sockets are opened
+// close-on-exec, so the old port-80 listener is released as part of the
+// exec itself — the new process binds it again immediately.
+func restartProcess() {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("restart: resolving executable path: %v", err)
+		return
+	}
+	args := append([]string{exe}, os.Args[1:]...)
+	if err := syscall.Exec(exe, args, os.Environ()); err != nil {
+		log.Printf("restart: exec failed: %v", err)
+	}
 }
 
 func (a *app) sessionWSHandler() http.Handler {

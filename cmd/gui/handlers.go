@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"swarmdialer/internal/orchestrator"
@@ -340,4 +342,91 @@ func didLookup(srv *store.Server) map[string]string {
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": a.allSnapshots()})
+}
+
+// --- Settings: reset ---
+
+type resetInstanceRequest struct {
+	ServerID string `json:"server_id"`
+}
+
+// handleResetInstance tears down everything SwarmDialer created on one
+// PBXware instance (see wizard.ResetInstance) and removes it from the
+// store. Best-effort on the PBXware side — a partial failure (reported as
+// a "warning" in the response, not an HTTP error) still results in the
+// server being removed from SwarmDialer, since staying "connected" to an
+// instance whose trunk/tenant might already be half-deleted isn't useful
+// either way.
+func (a *app) handleResetInstance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req resetInstanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	srv := a.store.GetServer(req.ServerID)
+	if srv == nil {
+		writeError(w, http.StatusNotFound, errServerNotFound)
+		return
+	}
+
+	warnings := wizard.ResetInstance(srv)
+
+	a.mu.Lock()
+	delete(a.localSessions, srv.ID)
+	for key := range a.remoteSessions {
+		callerID, calleeID, _ := strings.Cut(key, "|")
+		if callerID == srv.ID || calleeID == srv.ID {
+			delete(a.remoteSessions, key)
+		}
+	}
+	a.mu.Unlock()
+
+	// The peer side's own trunk (a separate PBXware object on a separate
+	// instance) isn't touched by resetting srv — only srv's "connected to
+	// X" bookkeeping is stale now, so just clear that reference rather
+	// than deleting anything real on the peer.
+	if srv.PeerServerID != "" {
+		if peer := a.store.GetServer(srv.PeerServerID); peer != nil {
+			peer.PeerServerID = ""
+			_ = a.store.UpdateServer(peer)
+		}
+	}
+
+	if err := a.store.RemoveServer(srv.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	resp := map[string]any{"success": true}
+	if len(warnings) > 0 {
+		resp["warning"] = strings.Join(warnings, "; ")
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleResetSwarmDialer deletes the persisted config file and restarts
+// the GUI process in place (see restartProcess) — the equivalent of a
+// fresh deployment with no server configured, without touching anything
+// on PBXware itself. The restart happens after the response is sent (in a
+// short-delayed goroutine) so the browser actually sees success before
+// the process image is replaced.
+func (a *app) handleResetSwarmDialer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := os.Remove(a.configPath); err != nil && !os.IsNotExist(err) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		restartProcess()
+	}()
 }

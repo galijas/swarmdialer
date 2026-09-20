@@ -102,6 +102,16 @@ func (c *Client) UpdatePackage(id int, name string) error {
 	return err
 }
 
+// DeletePackage deletes a tenant package — server must be 1, same
+// convention as AddPackage/UpdatePackage's implicit system-level scope.
+func (c *Client) DeletePackage(id int) error {
+	_, err := c.call("pbxware.package.delete", url.Values{
+		"server": {"1"},
+		"id":     {strconv.Itoa(id)},
+	})
+	return err
+}
+
 // EnsureSwarmDialerPackage returns the ID of the SwarmDialerPackageName
 // tenant package, creating it if it doesn't already exist — or updating
 // it to the current profile if it does, the same "always re-apply,

@@ -16,6 +16,7 @@
   <nav class="tabs">
     <button id="tab-btn-wizard" class="active" onclick="showTab('wizard')">Setup Wizard</button>
     <button id="tab-btn-dashboard" onclick="showTab('dashboard')">Dashboard</button>
+    <button id="tab-btn-settings" onclick="showTab('settings')">Settings</button>
   </nav>
 </header>
 
@@ -162,6 +163,35 @@
     </div>
     <div id="call-log"></div>
     <div id="call-graph" class="hidden"><div id="call-graph-rows"></div></div>
+  </div>
+
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section id="tab-settings" class="hidden">
+
+  <div class="panel">
+    <h2>Reset Instances</h2>
+    <p class="status-line">Deletes everything SwarmDialer created on that PBXware instance — trunk, tenant &amp; tenant package for Multi-Tenant editions, or trunk &amp; extensions otherwise — and removes it from SwarmDialer. Does not affect anything on the other (peer) instance. Tenant deletion can take several minutes.</p>
+    <div class="increment-row">
+      <button class="btn danger" id="reset-instance-1-btn" onclick="resetInstance(0)" disabled>Reset —</button>
+      <button class="btn danger" id="reset-instance-2-btn" onclick="resetInstance(1)" disabled>Reset —</button>
+    </div>
+    <div class="status-line" id="reset-instance-status"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Reset SwarmDialer</h2>
+    <p class="status-line">Deletes SwarmDialer's saved configuration and restarts the GUI, back to a fresh-deployment state. Does not touch anything on PBXware — reset the instances above first if you want those cleaned up too.</p>
+    <button class="btn danger" onclick="resetSwarmDialer()">Reset SwarmDialer to Default</button>
+    <div class="status-line" id="reset-swarmdialer-status"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Full Reset</h2>
+    <p class="status-line">Resets every connected instance, then resets SwarmDialer itself. This cannot be undone.</p>
+    <button class="btn danger" onclick="resetAll()">Reset All Instances &amp; SwarmDialer VPS</button>
+    <div class="status-line" id="reset-all-status"></div>
   </div>
 
 </section>

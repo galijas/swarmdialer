@@ -136,3 +136,18 @@ func (s *Store) UpdateServer(srv *Server) error {
 	}
 	return fmt.Errorf("no server with id %q", srv.ID)
 }
+
+// RemoveServer deletes the server with the given ID and persists — used by
+// Settings' "reset instance" (see wizard.ResetInstance for what's torn
+// down on PBXware itself before this is called).
+func (s *Store) RemoveServer(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, existing := range s.cfg.Servers {
+		if existing.ID == id {
+			s.cfg.Servers = append(s.cfg.Servers[:i], s.cfg.Servers[i+1:]...)
+			return s.save()
+		}
+	}
+	return fmt.Errorf("no server with id %q", id)
+}

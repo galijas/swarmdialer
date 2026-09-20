@@ -112,6 +112,17 @@ func (c *Client) AddTenant(p TenantParams) (int, error) {
 	return id, nil
 }
 
+// DeleteTenant deletes a tenant — server must be 1 per the API's own
+// convention for tenant-level actions (see AddTenant), even though the
+// tenant being deleted has its own separate tenant/server ID.
+func (c *Client) DeleteTenant(tenantID int) error {
+	_, err := c.call("pbxware.tenant.delete", url.Values{
+		"server": {"1"},
+		"id":     {strconv.Itoa(tenantID)},
+	})
+	return err
+}
+
 // TenantChannelLimits is a tenant's current concurrent-resource capacity,
 // as read back from pbxware.tenant.configuration. PBXware tracks these as
 // separate, independently-defaulted pools — Local/Remote SIP channels are
@@ -375,6 +386,15 @@ func (c *Client) AddExtension(p ExtensionParams) (ExtensionResult, error) {
 	}
 	ext, _ := toInt(body["ext"]) // best-effort; not fatal if PBXware omits it
 	return ExtensionResult{ExtensionID: id, Ext: ext}, nil
+}
+
+// DeleteExtension deletes one extension.
+func (c *Client) DeleteExtension(server, extensionID int) error {
+	_, err := c.call("pbxware.ext.delete", url.Values{
+		"server": {strconv.Itoa(server)},
+		"id":     {strconv.Itoa(extensionID)},
+	})
+	return err
 }
 
 // ExtensionConfig is the subset of pbxware.ext.configuration we need to build
