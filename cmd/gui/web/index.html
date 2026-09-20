@@ -120,13 +120,15 @@
       <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (silence audio)</label></div>
     </div>
     <div class="increment-row">
-      <button class="btn" onclick="confirmDial('local',25)">+25</button>
-      <button class="btn" onclick="confirmDial('local',50)">+50</button>
-      <button class="btn" onclick="confirmDial('local',100)">+100</button>
-      <button class="btn" onclick="confirmDial('local',250)">+250</button>
-      <button class="btn danger" onclick="confirmDial('local',500)">+500</button>
-      <button class="btn danger" onclick="confirmDial('local',1000)">+1000</button>
-      <button class="btn stop stop-btn" onclick="confirmStop('local')">Stop All</button>
+      <div class="increment-buttons">
+        <button class="btn" onclick="confirmDial('local',25)">+25</button>
+        <button class="btn" onclick="confirmDial('local',50)">+50</button>
+        <button class="btn" onclick="confirmDial('local',100)">+100</button>
+        <button class="btn" onclick="confirmDial('local',250)">+250</button>
+        <button class="btn danger" onclick="confirmDial('local',500)">+500</button>
+        <button class="btn danger" onclick="confirmDial('local',1000)">+1000</button>
+      </div>
+      <button class="btn stop" onclick="confirmStop('local')">Stop All</button>
     </div>
   </div>
 
@@ -139,13 +141,15 @@
       <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (silence audio)</label></div>
     </div>
     <div class="increment-row">
-      <button class="btn" onclick="confirmDial('remote',25)">+25</button>
-      <button class="btn" onclick="confirmDial('remote',50)">+50</button>
-      <button class="btn" onclick="confirmDial('remote',100)">+100</button>
-      <button class="btn" onclick="confirmDial('remote',250)">+250</button>
-      <button class="btn danger" onclick="confirmDial('remote',500)">+500</button>
-      <button class="btn danger" onclick="confirmDial('remote',1000)">+1000</button>
-      <button class="btn stop stop-btn" onclick="confirmStop('remote')">Stop All</button>
+      <div class="increment-buttons">
+        <button class="btn" onclick="confirmDial('remote',25)">+25</button>
+        <button class="btn" onclick="confirmDial('remote',50)">+50</button>
+        <button class="btn" onclick="confirmDial('remote',100)">+100</button>
+        <button class="btn" onclick="confirmDial('remote',250)">+250</button>
+        <button class="btn danger" onclick="confirmDial('remote',500)">+500</button>
+        <button class="btn danger" onclick="confirmDial('remote',1000)">+1000</button>
+      </div>
+      <button class="btn stop" onclick="confirmStop('remote')">Stop All</button>
     </div>
       </div>
     </div>

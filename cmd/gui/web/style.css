@@ -179,20 +179,28 @@ button.btn.danger:hover { background: #ff7a8f; }
 button.btn.stop { background: var(--local); color: #06263f; }
 button.btn.stop:hover { background: #7ec2ff; }
 
+/* Same column template as .form-grid directly above it, so Stop All
+   (the row's 3rd item) lands in the same column as the Send RTP
+   checkbox — the two grids independently compute the same columns at
+   the same container width, keeping them aligned at any viewport size. */
 .increment-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 20px;
+  margin: 12px 0;
+  align-items: start;
+}
+
+.increment-buttons {
   display: flex;
   gap: 8px;
-  margin: 12px 0;
   flex-wrap: wrap;
+  grid-column: span 2;
 }
 
 .increment-row button {
   min-width: 64px;
 }
-
-/* Pushed to the right of the +N buttons (auto margin eats the row's
-   remaining space), separating it from them without a second row. */
-.stop-btn { margin-left: auto; }
 
 .progress-bar {
   height: 6px;
