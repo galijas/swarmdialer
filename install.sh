@@ -49,13 +49,14 @@ go build -o "$BIN_DIR/swarmdialer" ./cmd/swarmdialer
 go build -o "$BIN_DIR/loadtest" ./cmd/loadtest
 log "build complete: $BIN_DIR/gui (the main GUI server), plus provisioning/loadtest CLIs"
 
-# --- Optional: systemd service for the GUI, so it survives reboots/SSH
-# disconnects. Skipped by default — run with --systemd to set it up.
-if [ "${1:-}" = "--systemd" ]; then
-  UNIT=/etc/systemd/system/swarmdialer.service
-  INSTALL_ROOT="$(pwd)"
-  log "installing systemd service (listening on :80) at $UNIT"
-  cat > "$UNIT" <<EOF
+# --- systemd service for the GUI, so it starts on boot and restarts on
+# crash instead of needing someone to SSH in and run it by hand (see
+# PROJECT_STATE.md — this bit us live: the process died with no crash
+# logged, and nothing brought it back until a manual restart).
+UNIT=/etc/systemd/system/swarmdialer.service
+INSTALL_ROOT="$(pwd)"
+log "installing systemd service (listening on :80) at $UNIT"
+cat > "$UNIT" <<EOF
 [Unit]
 Description=SwarmDialer GUI
 After=network.target
@@ -63,14 +64,12 @@ After=network.target
 [Service]
 WorkingDirectory=$INSTALL_ROOT
 ExecStart=$INSTALL_ROOT/bin/gui -addr :80 -config $INSTALL_ROOT/swarmdialer_config.json
-Restart=on-failure
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable --now swarmdialer
-  log "service started — check with: systemctl status swarmdialer"
-else
-  log "run 'sudo ./bin/gui' to start the GUI (port 80 needs root), or re-run this script with --systemd to install it as a service"
-fi
+systemctl daemon-reload
+systemctl enable --now swarmdialer
+log "service started and enabled on boot — check with: systemctl status swarmdialer"
