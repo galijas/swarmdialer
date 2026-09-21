@@ -15,42 +15,32 @@ one environment — the wizard collects all connection details (API keys,
 IPs) at runtime, so nothing about a specific PBXware instance is baked
 into the tool itself.
 
+Tested on Ubuntu 24.04. The PBXware instance(s) you connect it to should
+be fresh, dedicated test systems — not production — since this is how it
+was tested and validated: SwarmDialer provisions (and later deletes)
+real tenants, extensions, trunks, and DIDs on whatever instance you point
+it at.
+
 ## Deploying on a fresh Ubuntu server
 
 1. **Clone the repo** onto the server that will run the load test:
 
    ```
-   git clone git@github.com:galijas/swarmdialer.git
-   cd swarmdialer
+   mkdir /root/swarmdialer
+   cd /root/swarmdialer
+   git clone git@github.com:galijas/swarmdialer.git .
    ```
 
 2. **Run the install script.** It installs `ca-certificates` and Go if
-   either is missing, then builds the binaries into `bin/`:
+   either is missing, builds the binaries into `bin/`, and sets up a
+   systemd service so the GUI starts on boot and restarts automatically
+   if it ever dies:
 
    ```
    sudo ./install.sh
    ```
 
-   Optionally, install it as a systemd service so it survives reboots and
-   SSH disconnects:
-
-   ```
-   sudo ./install.sh --systemd
-   ```
-
-3. **Start the GUI** (skip this if you used `--systemd` above, which
-   already starts it):
-
-   ```
-   sudo ./bin/gui
-   ```
-
-   Root is required because the GUI listens on port 80 by default, so
-   it's reachable at just `http://<server-ip>/` — no port to remember.
-   Pass `-addr :8080` (or any other address) if you'd rather not run it
-   on 80.
-
-4. **Open `http://<server-ip>/`** in a browser and complete the Setup
+3. **Open `http://<server-ip>/`** in a browser and complete the Setup
    Wizard: connect to your PBXware instance (base URL + API key),
    provision a tenant and test extensions, and optionally connect a
    second PBXware instance for cross-server (trunk/DID) testing. Once
