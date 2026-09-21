@@ -11,24 +11,28 @@ cross-server call volume on demand while watching a live log and call
 graph of what's happening.
 
 It's built to be deployed fresh wherever it's needed, not tied to any
-one environment — the wizard collects all connection details (API keys,
+one environment - the wizard collects all connection details (API keys,
 IPs) at runtime, so nothing about a specific PBXware instance is baked
 into the tool itself.
 
 Tested on Ubuntu 24.04. The PBXware instance(s) you connect it to should
-be fresh, dedicated test systems — not production — since this is how it
+be fresh, dedicated test systems - not production - since this is how it
 was tested and validated: SwarmDialer provisions (and later deletes)
 real tenants, extensions, trunks, and DIDs on whatever instance you point
 it at.
 
 ## Deploying on a fresh Ubuntu server
 
-1. **Clone the repo** onto the server that will run the load test:
+1. **Clone the repo** onto the freshly deployed Ubuntu (24.04) VPS/server that will run the load test:
 
    ```
    mkdir /root/swarmdialer
    cd /root/swarmdialer
-   git clone git@github.com:galijas/swarmdialer.git .
+   git clone https://github.com/galijas/swarmdialer.git
+
+   #You may need to install git first, before running the 'git clone command':
+   #sudo apt update
+   #sudo apt install git
    ```
 
 2. **Run the install script.** It installs `ca-certificates` and Go if
@@ -45,7 +49,7 @@ it at.
    provision a tenant and test extensions, and optionally connect a
    second PBXware instance for cross-server (trunk/DID) testing. Once
    configured, the page opens straight to the Dashboard on every later
-   visit — reconfigure at any time from there.
+   visit - reconfigure at any time from there.
 
 Configuration (which servers are connected, what was provisioned) is
 persisted to `swarmdialer_config.json` in the working directory, and is
