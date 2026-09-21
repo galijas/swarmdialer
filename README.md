@@ -16,23 +16,23 @@ IPs) at runtime, so nothing about a specific PBXware instance is baked
 into the tool itself.
 
 Tested on Ubuntu 24.04. The PBXware instance(s) you connect it to should
-be fresh, dedicated test systems - not production - since this is how it
-was tested and validated: SwarmDialer provisions (and later deletes)
-real tenants, extensions, trunks, and DIDs on whatever instance you point
-it at.
+be fresh, dedicated test systems - **not production** - since this is 
+how it was tested and validated: SwarmDialer provisions real tenants, 
+extensions, trunks, and DIDs on the instance you point it to. You can 
+optionally have it delete the resources it created later.
 
-## Deploying on a fresh Ubuntu server
+## Deploying on a Fresh Ubuntu (24.04) VPS/Server
 
 1. **Clone the repo** onto the freshly deployed Ubuntu (24.04) VPS/server that will run the load test:
 
    ```
-   mkdir /root/swarmdialer
-   cd /root/swarmdialer
-   git clone https://github.com/galijas/swarmdialer.git
-
-   #You may need to install git first, before running the 'git clone command':
+   #You may need to install git before running the 'git clone' command:
    #sudo apt update
    #sudo apt install git
+
+   cd /root/
+   git clone https://github.com/galijas/swarmdialer.git
+   cd /root/swarmdialer/
    ```
 
 2. **Run the install script.** It installs `ca-certificates` and Go if
@@ -53,5 +53,5 @@ it at.
 
 Configuration (which servers are connected, what was provisioned) is
 persisted to `swarmdialer_config.json` in the working directory, and is
-specific to this deployment — nothing here is meant to be copied between
+specific to this deployment - nothing here is meant to be copied between
 environments. Set `-config <path>` to change where it's stored.
