@@ -18,3 +18,26 @@ func (c *Client) GetSystemExtensionLength() (int, error) {
 	}
 	return toInt(body["numbering"])
 }
+
+// SystemConfiguration is the subset of pbxware.server.configuration's
+// response VerifySystemSettings needs. Notably, this response never
+// includes the system-wide codec allowlist (local_codecs/remote_codecs),
+// even once it's been set via the admin GUI (confirmed live 2026-09-23)
+// — that has to be checked indirectly (see wizard.VerifySystemSettings).
+type SystemConfiguration struct {
+	IncomingLimit int
+	OutgoingLimit int
+}
+
+// GetSystemConfiguration reads a non-Multi-Tenant instance's system-wide
+// configuration — primarily for its Local/Remote channel limits (see
+// VerifySystemSettings).
+func (c *Client) GetSystemConfiguration() (SystemConfiguration, error) {
+	body, err := c.call("pbxware.server.configuration", nil)
+	if err != nil {
+		return SystemConfiguration{}, err
+	}
+	in, _ := toInt(body["incominglimit"])
+	out, _ := toInt(body["outgoinglimit"])
+	return SystemConfiguration{IncomingLimit: in, OutgoingLimit: out}, nil
+}

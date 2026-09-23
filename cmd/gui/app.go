@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"swarmdialer/internal/logstore"
 	"swarmdialer/internal/orchestrator"
 	"swarmdialer/internal/statusapi"
 	"swarmdialer/internal/store"
@@ -33,6 +34,7 @@ var webFS embed.FS
 type app struct {
 	ctx        context.Context
 	store      *store.Store
+	logs       *logstore.Store
 	configPath string // see handleResetSwarmDialer
 
 	mu             sync.Mutex
@@ -50,9 +52,14 @@ func newApp(ctx context.Context, configPath string) (*app, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening config: %w", err)
 	}
+	logs, err := logstore.New("logs")
+	if err != nil {
+		return nil, fmt.Errorf("opening log store: %w", err)
+	}
 	return &app{
 		ctx:            ctx,
 		store:          st,
+		logs:           logs,
 		configPath:     configPath,
 		provisionJobs:  make(map[string]*wizard.ProvisionProgress),
 		connectJobs:    make(map[string]*wizard.ConnectProgress),
@@ -88,6 +95,7 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
 	mux.HandleFunc("/api/wizard/test-connection", a.handleTestConnection)
+	mux.HandleFunc("/api/wizard/verify-system-settings", a.handleVerifySystemSettings)
 	mux.HandleFunc("/api/wizard/provision", a.handleProvision)
 	mux.HandleFunc("/api/wizard/provision/status", a.handleProvisionStatus)
 	mux.HandleFunc("/api/wizard/connect", a.handleConnect)
@@ -99,6 +107,11 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/reset-instance", a.handleResetInstance)
 	mux.HandleFunc("/api/settings/reset-instance/status", a.handleResetInstanceStatus)
 	mux.HandleFunc("/api/settings/reset-swarmdialer", a.handleResetSwarmDialer)
+	mux.HandleFunc("/api/settings/clear-logs", a.handleClearLogs)
+	mux.HandleFunc("/api/logs", a.handleListLogs)
+	mux.HandleFunc("/api/logs/view", a.handleViewLog)
+	mux.HandleFunc("/api/logs/download", a.handleDownloadLog)
+	mux.HandleFunc("/api/logs/delete", a.handleDeleteLog)
 	mux.Handle("/ws/status", a.sessionWSHandler())
 }
 

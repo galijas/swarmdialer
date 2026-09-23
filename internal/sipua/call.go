@@ -157,8 +157,11 @@ func (p *Phone) Register(ctx context.Context, dialDestination, sipDomain string,
 }
 
 // AutoAnswer makes this phone accept every inbound INVITE: answer with an
-// SDP offering G.711, learn the caller's RTP address from their offer, and
-// start exchanging silence-payload RTP for the call's duration.
+// SDP matching whatever single codec the caller's offer specified (see
+// parseSDPCodec — buildSDP never offers more than one, so this always
+// resolves unless the peer isn't SwarmDialer itself), learn the caller's
+// RTP address from their offer, and start exchanging silence-payload RTP
+// for the call's duration.
 func (p *Phone) AutoAnswer(ctx context.Context) {
 	p.Server.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
 		dlg, err := p.DialogServer.ReadInvite(req, tx)
@@ -181,8 +184,13 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 			return
 		}
 		sendMedia := sdpWantsMedia(req.Body())
+		codec, err := parseSDPCodec(req.Body())
+		if err != nil {
+			log.Printf("sipua: %s: parsing caller's offered codec, defaulting to %s: %v", p.Endpoint.AOR, DefaultCodec, err)
+			codec = DefaultCodec
+		}
 
-		rtpSession, err := NewRTPSession(0)
+		rtpSession, err := NewRTPSession(0, codec)
 		if err != nil {
 			log.Printf("sipua: %s: allocating RTP session: %v", p.Endpoint.AOR, err)
 			return
@@ -193,7 +201,7 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 			return
 		}
 
-		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia)
+		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia, codec)
 		if err := dlg.RespondSDP(sdp); err != nil {
 			log.Printf("sipua: %s: responding 200 with SDP: %v", p.Endpoint.AOR, err)
 			rtpSession.Stop()
@@ -221,7 +229,8 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 // honors symmetrically — see sipua.buildSDP). dialDestination is the
 // actual network target (PBXware's host:port); sipDomain is the domain to
 // put in the SIP headers (see Register's doc comment for why these can
-// differ).
+// differ). codec picks the single codec offered in the SDP (see codec.go)
+// — the answering side matches it automatically (see AutoAnswer).
 //
 // ctx governs the whole call's lifetime — in particular, it's what
 // RTPSession.Start uses, so it must stay live for as long as the call
@@ -232,20 +241,20 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 // function conflated the two and silently truncated RTP to whatever
 // timeout the caller used for dialing, which went unnoticed until the
 // Session rework's tighter testing surfaced it (see PROJECT_STATE.md).
-func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestination, sipDomain, calleeAOR string, sendMedia bool) (*Call, error) {
+func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestination, sipDomain, calleeAOR string, sendMedia bool, codec Codec) (*Call, error) {
 	recipient := sip.Uri{}
 	if err := sip.ParseUri(fmt.Sprintf("sip:%s@%s", calleeAOR, sipDomain), &recipient); err != nil {
 		return nil, fmt.Errorf("parsing recipient URI: %w", err)
 	}
 
-	rtpSession, err := NewRTPSession(0)
+	rtpSession, err := NewRTPSession(0, codec)
 	if err != nil {
 		return nil, fmt.Errorf("allocating RTP session: %w", err)
 	}
 
 	req := sip.NewRequest(sip.INVITE, recipient)
 	req.SetDestination(dialDestination)
-	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia))
+	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia, codec))
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 
 	// Same identity fix as Register: without an explicit From, sipgo

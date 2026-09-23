@@ -41,8 +41,18 @@ type Server struct {
 	SIPHost string `json:"sip_host"`
 	LocalIP string `json:"local_ip"`
 
-	TenantID   int    `json:"tenant_id"`   // 0 if this edition skips tenant creation
+	TenantID   int    `json:"tenant_id"` // 0 if this edition skips tenant creation
 	TenantCode string `json:"tenant_code"`
+
+	// CodecsAvailable is false only when a non-Multi-Tenant instance's
+	// system-wide codec allowlist couldn't be confirmed to include
+	// SwarmDialer's non-default codecs (g722/g729/opus) at connect time —
+	// see wizard.VerifySystemSettings and the wizard's "raise these
+	// manually" prompt for non-Multi-Tenant instances. Always true for
+	// Multi-Tenant editions, whose tenant-level codec allowlist SwarmDialer
+	// sets itself (see pbxware.ResaveTenant). The dashboard restricts the
+	// codec dropdown to ulaw-only for a server where this is false.
+	CodecsAvailable bool `json:"codecs_available"`
 
 	Extensions []pbxware.ProvisionedExtension `json:"extensions"`
 

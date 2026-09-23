@@ -415,3 +415,59 @@ button.btn.stop:hover { background: #7ec2ff; }
   opacity: 0.5;
   pointer-events: none;
 }
+
+.collapsible-header {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.collapsible-header:hover { color: var(--accent); }
+
+.collapsible-header .chevron {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.collapsible-header.expanded .chevron { transform: rotate(90deg); }
+
+.log-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* Collapsed by default (see toggleLogPanel in app.js) rather than capping
+   how many logs are listed — the list has no size limit, so this keeps an
+   unbounded history out of the way until the user asks to see it. */
+.log-list.collapsed { display: none; }
+
+.log-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--panel-alt);
+}
+
+.log-row-name { font-family: var(--mono); font-size: 13px; }
+.log-row-meta { font-size: 12px; color: var(--muted); }
+
+.log-row-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.log-row-actions button {
+  padding: 6px 12px;
+  font-size: 13px;
+}

@@ -114,6 +114,13 @@ type ProvisionParams struct {
 	International string
 	ChannelLimit  int // raised from PBXware's 8 default — see pbxware.ResaveTenant
 	MaxWait       time.Duration
+	// CodecsAvailable is only meaningful for non-Multi-Tenant editions —
+	// what the wizard's verify-system-settings step determined about this
+	// instance's system-wide codec allowlist (see
+	// pbxware.VerifySystemSettings). Multi-Tenant always ends up true
+	// regardless of this field, since Provision sets the tenant-level
+	// allowlist itself.
+	CodecsAvailable bool
 }
 
 // Provision creates (or, for non-Multi-Tenant editions, skips) a tenant
@@ -138,6 +145,7 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 		return nil, fmt.Errorf("detecting local IP: %w", err)
 	}
 
+	isMultiTenant := license.IsMultiTenant()
 	srv := &store.Server{
 		ID:      fmt.Sprintf("srv-%d", time.Now().UnixNano()),
 		Name:    p.Name,
@@ -146,11 +154,15 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 		Edition: license.Edition,
 		SIPHost: SIPHostFrom(p.BaseURL),
 		LocalIP: localIP,
+		// Multi-Tenant always ends up true (Provision sets the
+		// tenant-level codec allowlist itself, below); non-Multi-Tenant
+		// carries through whatever the wizard's earlier verify-system-
+		// settings step determined.
+		CodecsAvailable: isMultiTenant || p.CodecsAvailable,
 	}
 
 	tenantID := 1            // system level — used directly for non-Multi-Tenant editions
 	extDigits := p.ExtLength // Multi-Tenant: our own free choice, set on the tenant below
-	isMultiTenant := license.IsMultiTenant()
 	if isMultiTenant {
 		progress.set(func() { progress.message = "ensuring tenant package exists" })
 		packageID, err := client.EnsureSwarmDialerPackage()
@@ -261,7 +273,7 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 			UA:            50,             // Generic SIP
 			IncomingLimit: p.ChannelLimit, // was hardcoded to 2 — capped every extension's own concurrency, not just the tenant's
 			OutgoingLimit: p.ChannelLimit,
-			AllowedCodecs: "ulaw:alaw",
+			AllowedCodecs: pbxware.SwarmDialerCodecs,
 		}, p.MaxWait)
 		if err != nil {
 			if pbxware.IsReservedExtensionError(err) {

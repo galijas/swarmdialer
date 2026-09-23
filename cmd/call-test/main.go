@@ -72,7 +72,7 @@ func main() {
 
 	callee.AutoAnswer(ctx)
 
-	call, err := caller.Dial(ctx, 15*time.Second, *server, sipDomain, *calleeAOR, true)
+	call, err := caller.Dial(ctx, 15*time.Second, *server, sipDomain, *calleeAOR, true, sipua.DefaultCodec)
 	if err != nil {
 		log.Fatalf("dialing %s: %v", *calleeAOR, err)
 	}

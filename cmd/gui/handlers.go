@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"swarmdialer/internal/logstore"
 	"swarmdialer/internal/orchestrator"
 	"swarmdialer/internal/pbxware"
 	"swarmdialer/internal/sipua"
@@ -67,6 +68,34 @@ func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleVerifySystemSettings checks whether a non-Multi-Tenant instance's
+// system-wide channel limit and codec allowlist have been manually raised
+// yet — see wizard.VerifySystemSettings for why this can only check, not
+// fix, either of them (both are GUI-only settings with no API write
+// path). The wizard's connect step for non-Multi-Tenant instances polls
+// this after showing its blocking "go raise these manually" prompt.
+func (a *app) handleVerifySystemSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req testConnectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	check, err := wizard.VerifySystemSettings(req.BaseURL, req.APIKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channels_ok":      check.ChannelsOK,
+		"current_channels": check.CurrentChannels,
+		"codecs_ok":        check.CodecsOK,
+	})
+}
+
 // --- Wizard: provision ---
 
 type provisionRequest struct {
@@ -80,6 +109,13 @@ type provisionRequest struct {
 	Country        string `json:"country"`
 	National       string `json:"national"`
 	International  string `json:"international"`
+	// CodecsAvailable: for non-Multi-Tenant editions, what the wizard's
+	// verify-system-settings step (before this) determined — see
+	// wizard.VerifySystemSettings. Ignored for Multi-Tenant, which is
+	// always true (SwarmDialer sets the tenant-level codec allowlist
+	// itself). Frontend defaults this to true if the check was skipped
+	// for some reason, matching the pre-codec-selector behavior.
+	CodecsAvailable bool `json:"codecs_available"`
 }
 
 func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +143,7 @@ func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
 			ExtLength: req.ExtLength,
 			Country:   req.Country, National: req.National, International: req.International,
 			ChannelLimit: 600, MaxWait: 10 * time.Minute,
+			CodecsAvailable: req.CodecsAvailable,
 		}, progress)
 		if err != nil {
 			return // progress already carries the error
@@ -189,16 +226,17 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 	// Omit API keys from what the browser sees — no reason to put them in
 	// the DOM/JS console even on a no-auth internal tool.
 	type serverView struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		BaseURL      string `json:"base_url"`
-		Edition      string `json:"edition"`
-		TenantID     int    `json:"tenant_id"`
-		TenantCode   string `json:"tenant_code"`
-		ExtCount     int    `json:"extension_count"`
-		TrunkID      int    `json:"trunk_id,omitempty"`
-		PeerServerID string `json:"peer_server_id,omitempty"`
-		DIDCount     int    `json:"did_count"`
+		ID              string `json:"id"`
+		Name            string `json:"name"`
+		BaseURL         string `json:"base_url"`
+		Edition         string `json:"edition"`
+		TenantID        int    `json:"tenant_id"`
+		TenantCode      string `json:"tenant_code"`
+		ExtCount        int    `json:"extension_count"`
+		TrunkID         int    `json:"trunk_id,omitempty"`
+		PeerServerID    string `json:"peer_server_id,omitempty"`
+		DIDCount        int    `json:"did_count"`
+		CodecsAvailable bool   `json:"codecs_available"`
 	}
 	views := make([]serverView, 0, len(servers))
 	for _, s := range servers {
@@ -206,6 +244,11 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 			ID: s.ID, Name: s.Name, BaseURL: s.BaseURL, Edition: s.Edition,
 			TenantID: s.TenantID, TenantCode: s.TenantCode, ExtCount: len(s.Extensions),
 			TrunkID: s.TrunkID, PeerServerID: s.PeerServerID, DIDCount: len(s.DIDs),
+			// Multi-Tenant always has its tenant-level codec allowlist set by
+			// SwarmDialer itself (see pbxware.ResaveTenant), so this is always
+			// true for it regardless of the persisted flag — covers servers
+			// connected before CodecsAvailable existed (see store.Server).
+			CodecsAvailable: s.CodecsAvailable || strings.EqualFold(s.Edition, "Multi-Tenant"),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"servers": views})
@@ -220,6 +263,7 @@ type dialRequest struct {
 	Count               int    `json:"count"`
 	CallDurationSeconds int    `json:"call_duration_seconds"`
 	UseRTP              bool   `json:"use_rtp"`
+	Codec               string `json:"codec"` // "ulaw" (default), "g722", "g729", or "opus" — see sipua.Codec
 }
 
 func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +282,16 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	logSection, reportLabel, reportClient, reportServerID, err := a.batchReportTarget(req.Section, req.ServerID, req.PeerServerID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	codec := sipua.Codec(req.Codec)
+	if !sipua.IsValidCodec(codec) {
+		codec = sipua.DefaultCodec
+	}
 
 	callDuration := time.Duration(req.CallDurationSeconds) * time.Second
 	// 200ms was too aggressive at scale — a live GUI test with 200
@@ -246,7 +300,9 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 	// the last empirically-safe value found during small-scale testing;
 	// re-tune from real data as testing moves to higher call counts.
 	const rampInterval = 800 * time.Millisecond
-	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP)
+	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP, codec, func(records []orchestrator.CallRecord) {
+		a.reportBatch(logSection, reportLabel, reportClient, reportServerID, sess, req.Count, records)
+	})
 	writeJSON(w, http.StatusOK, map[string]int{"started": started})
 }
 
@@ -315,6 +371,33 @@ func (a *app) sessionFor(section, serverID, peerServerID string) (*orchestrator.
 	}
 	a.localSessions[serverID] = sess
 	return sess, nil
+}
+
+// batchReportTarget resolves what reportBatch needs to log/query MOS for
+// a dial request: which log section it belongs in, a human-readable
+// label for the log file/live-status line, and the PBXware client +
+// server/tenant ID to query CDRs against. That's always the *caller's*
+// own instance — for a remote batch, a cross-instance call's CDR is
+// recorded on the side that originated it, not the callee's.
+func (a *app) batchReportTarget(section, serverID, peerServerID string) (logstore.Section, string, *pbxware.Client, int, error) {
+	srv := a.store.GetServer(serverID)
+	if srv == nil {
+		return "", "", nil, 0, errServerNotFound
+	}
+	client := pbxware.NewClient(srv.BaseURL, srv.APIKey)
+	cdrServerID := srv.TenantID
+	if cdrServerID == 0 {
+		cdrServerID = 1 // non-Multi-Tenant: extensions/CDRs live at system level
+	}
+
+	if section == "remote" {
+		peer := a.store.GetServer(peerServerID)
+		if peer == nil {
+			return "", "", nil, 0, errServerNotFound
+		}
+		return logstore.SectionRemote, srv.Name + " to " + peer.Name, client, cdrServerID, nil
+	}
+	return logstore.SectionLocal, srv.Name, client, cdrServerID, nil
 }
 
 // allocPortRangeLocked is allocPortRange without re-locking a.mu — callers
@@ -471,18 +554,24 @@ func (a *app) handleResetInstanceStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, progress.Snapshot())
 }
 
-// handleResetSwarmDialer deletes the persisted config file and restarts
-// the GUI process in place (see restartProcess) — the equivalent of a
-// fresh deployment with no server configured, without touching anything
-// on PBXware itself. The restart happens after the response is sent (in a
-// short-delayed goroutine) so the browser actually sees success before
-// the process image is replaced.
+// handleResetSwarmDialer deletes the persisted config file and every call
+// log, then restarts the GUI process in place (see restartProcess) — the
+// equivalent of a fresh deployment with no server configured and no call
+// history, without touching anything on PBXware itself. Also what
+// resetAll's frontend flow ends with, so "reset all" clears logs too
+// without needing separate handling. The restart happens after the
+// response is sent (in a short-delayed goroutine) so the browser actually
+// sees success before the process image is replaced.
 func (a *app) handleResetSwarmDialer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
 	if err := os.Remove(a.configPath); err != nil && !os.IsNotExist(err) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := a.logs.DeleteAll(); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

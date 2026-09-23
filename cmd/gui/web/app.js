@@ -19,6 +19,9 @@ function showTab(name) {
   if (name === 'dashboard') {
     refreshServerList();
     connectStatusSockets();
+    refreshLogList('local');
+    refreshLogList('remote');
+    startLogListPolling();
   }
   if (name === 'settings') {
     refreshSettingsTab();
@@ -77,7 +80,13 @@ async function testConnection(step) {
       ? 'Multi-Tenant edition detected — a tenant will be created.'
       : `"${result.edition}" edition detected — tenant creation is skipped; extensions are created at the system level.`;
 
+    let codecsAvailable = true;
+    if (!isMultiTenant) {
+      codecsAvailable = await verifySystemSettingsFlow(req.base_url, req.api_key, statusEl);
+    }
+
     window['pending' + step] = req; // stash for provision() to reuse
+    window['codecsAvailable' + step] = codecsAvailable;
     showStep('step-provision-' + step);
     // Left disabled — this step is done and showStep moved us past it;
     // there's no way back to re-click it.
@@ -85,6 +94,62 @@ async function testConnection(step) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
     btn.disabled = false;
+  }
+}
+
+// For a non-Multi-Tenant instance, PBXware's system-wide channel limit
+// (defaults to 246) and codec allowlist (defaults to ulaw/alaw/g722 —
+// missing g729/opus) are both GUI-only settings with no API write path
+// (see wizard.VerifySystemSettings) — SwarmDialer can only check whether
+// they've been raised manually, not do it itself. This blocks the wizard
+// here until the user confirms they've made both changes, actually
+// verifies it, and — if verification keeps failing — offers to skip and
+// continue with the codec selector disabled for this instance rather
+// than getting stuck. Returns whether the codec selector should be
+// enabled for this server (always true if the user never needed this
+// flow — Multi-Tenant callers don't call this at all).
+async function verifySystemSettingsFlow(baseURL, apiKey, statusEl) {
+  const askFirst = confirm(
+    'This is a non-Multi-Tenant instance. Before continuing, please raise TWO system-wide settings manually in its PBXware admin GUI, right now:\n\n' +
+    '1. Local/Remote channel limits — raise to 512 (default is 246).\n' +
+    '2. Codec allowlist (Local/Remote codecs) — add g722, g729, and opus.\n\n' +
+    'Click OK once you\'ve made BOTH changes, or Cancel to go do it and come back later.'
+  );
+  if (!askFirst) {
+    statusEl.textContent = 'Waiting — raise the channel limit and codec allowlist on this instance, then click Next again.';
+    statusEl.className = 'status-line error';
+    throw new Error('system settings not yet raised'); // caught by testConnection's catch, re-enables the Next button
+  }
+
+  while (true) {
+    statusEl.textContent = 'Checking channel limits and codec allowlist...';
+    let check;
+    try {
+      check = await api('/api/wizard/verify-system-settings', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({base_url: baseURL, api_key: apiKey}),
+      });
+    } catch (e) {
+      check = {channels_ok: false, codecs_ok: false, current_channels: 0};
+    }
+
+    if (check.channels_ok && check.codecs_ok) {
+      statusEl.textContent = 'Channel limits and codec allowlist confirmed — continuing.';
+      statusEl.className = 'status-line';
+      return true;
+    }
+
+    const retry = confirm(
+      'Still not detected:\n' +
+      `- Channels: ${check.current_channels}/512 — ${check.channels_ok ? 'OK' : 'NOT raised yet'}\n` +
+      `- Codec allowlist (g722/g729/opus): ${check.codecs_ok ? 'OK' : 'NOT raised yet'}\n\n` +
+      'Click OK to check again after making the change(s), or Cancel to skip and continue without codec selector support for this instance (calls will stay capped at the default 246 channels).'
+    );
+    if (!retry) {
+      statusEl.textContent = 'Skipped — codec selector will be disabled for this instance, and calls will stay capped at the default 246 channels.';
+      statusEl.className = 'status-line error';
+      return false;
+    }
   }
 }
 
@@ -115,6 +180,7 @@ async function provision(step) {
     // already require anyway (see wizard.Provision's digit-length
     // detection for those).
     ext_length: 4, country: '869', national: '1', international: '011',
+    codecs_available: window['codecsAvailable' + step] !== false,
   };
 
   try {
@@ -218,8 +284,11 @@ async function connectServers() {
 
 // ---------- Dashboard: server list ----------
 
+let lastServers = []; // last-fetched /api/servers result, kept for codec-dropdown lookups
+
 async function refreshServerList() {
   const {servers} = await api('/api/servers');
+  lastServers = servers;
   const list = document.getElementById('server-list');
   list.innerHTML = '';
   servers.forEach(s => {
@@ -249,6 +318,42 @@ async function refreshServerList() {
   populateSelect('remote-pair-select', pairs);
 
   document.getElementById('remote-dialer-panel').classList.toggle('disabled-overlay', pairs.length === 0);
+
+  updateCodecDropdown('local');
+  updateCodecDropdown('remote');
+}
+
+// Restricts a dialer's codec dropdown to ulaw-only when the server(s) it
+// would dial through don't have SwarmDialer's other codecs confirmed
+// available — see the wizard's verify-system-settings step for
+// non-Multi-Tenant instances (store.Server.CodecsAvailable). For remote,
+// this checks *both* sides of the pair, since the callee's instance has
+// to accept the offered codec too.
+function updateCodecDropdown(section) {
+  const select = document.getElementById(section + '-codec');
+  if (!select) return;
+  const byID = new Map(lastServers.map(s => [s.id, s]));
+
+  let available = true;
+  if (section === 'local') {
+    const srv = byID.get(document.getElementById('local-server-select').value);
+    available = !srv || srv.codecs_available;
+  } else {
+    const pairValue = document.getElementById('remote-pair-select').value;
+    if (pairValue) {
+      const [callerID, calleeID] = pairValue.split(':');
+      const caller = byID.get(callerID), callee = byID.get(calleeID);
+      available = (!caller || caller.codecs_available) && (!callee || callee.codecs_available);
+    }
+  }
+
+  Array.from(select.options).forEach(opt => {
+    opt.disabled = !available && opt.value !== 'ulaw';
+  });
+  if (!available && select.value !== 'ulaw') {
+    select.value = 'ulaw';
+  }
+  select.title = available ? '' : 'Only G.711 (ulaw) is available — this instance\'s codec allowlist wasn\'t confirmed during setup (Settings > re-add the instance to retry).';
 }
 
 function populateSelect(id, options) {
@@ -285,6 +390,7 @@ function confirmDial(section, count) {
   if (!confirm(`Start ${count} additional ${section} call(s)?`)) return;
   const duration = parseInt(document.getElementById(section + '-duration').value, 10);
   const useRTP = document.getElementById(section + '-rtp').checked;
+  const codec = document.getElementById(section + '-codec').value;
 
   const target = dialerTarget(section);
   if (!target) return;
@@ -294,10 +400,10 @@ function confirmDial(section, count) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       section, server_id: serverID, peer_server_id: peerServerID,
-      count, call_duration_seconds: duration, use_rtp: useRTP,
+      count, call_duration_seconds: duration, use_rtp: useRTP, codec,
     }),
   }).then(r => {
-    logLine(`Requested +${count} ${section} calls — ${r.started} started (pool availability may limit this).`);
+    logLine(`Requested +${count} ${section} calls (${codec}) — ${r.started} started (pool availability may limit this). A log will appear in ${section === 'local' ? 'Local' : 'Remote'} Call Logs once the batch finishes.`);
   }).catch(e => logLine('Error: ' + e.message, true));
 }
 
@@ -435,6 +541,89 @@ function logLine(html, isError) {
   log.scrollTop = log.scrollHeight;
 }
 
+// ---------- Dashboard: log browser ----------
+
+function formatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// Keeps the log list/count current while the dashboard is open, instead of
+// relying on a one-shot timer guessing when a batch's log will be ready
+// (confirmDial previously scheduled a refresh at duration+15s — too early
+// for a batch whose actual completion, after mosFinalizeDelay and CDR/MOS
+// lookups, ran longer than that guess, leaving the list stuck until the
+// next unrelated trigger like a tab switch). Runs for the life of the
+// page once started — same as the live-status WebSocket, cheap enough
+// not to bother stopping on tab switch.
+let logListPollTimer = null;
+function startLogListPolling() {
+  if (logListPollTimer) return;
+  logListPollTimer = setInterval(() => {
+    refreshLogList('local');
+    refreshLogList('remote');
+  }, 5000);
+}
+
+function toggleLogPanel(section) {
+  document.getElementById(section + '-log-list').classList.toggle('collapsed');
+  document.getElementById(section + '-log-header').classList.toggle('expanded');
+}
+
+async function refreshLogList(section) {
+  const list = document.getElementById(section + '-log-list');
+  const countEl = document.getElementById(section + '-log-count');
+  try {
+    const {logs} = await api('/api/logs?section=' + section);
+    if (countEl) countEl.textContent = logs ? logs.length : 0;
+    if (!logs || logs.length === 0) {
+      list.innerHTML = '<p class="status-line">No logs yet — run a batch of calls to create one.</p>';
+      return;
+    }
+    list.innerHTML = '';
+    logs.forEach(l => {
+      const row = document.createElement('div');
+      row.className = 'log-row';
+      const when = new Date(l.mod_time).toLocaleString();
+      row.innerHTML = `
+        <div class="log-row-info">
+          <div class="log-row-name">${l.name}</div>
+          <div class="log-row-meta">${when} — ${formatBytes(l.size_bytes)}</div>
+        </div>
+        <div class="log-row-actions">
+          <button class="btn secondary" onclick="viewLog('${section}','${l.name}')">View</button>
+          <button class="btn secondary" onclick="downloadLog('${section}','${l.name}')">Download</button>
+          <button class="btn danger" onclick="deleteLog('${section}','${l.name}')">Delete</button>
+        </div>`;
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = `<p class="status-line error">Error loading logs: ${e.message}</p>`;
+  }
+}
+
+function viewLog(section, name) {
+  window.open(`/api/logs/view?section=${encodeURIComponent(section)}&name=${encodeURIComponent(name)}`, '_blank');
+}
+
+function downloadLog(section, name) {
+  window.open(`/api/logs/download?section=${encodeURIComponent(section)}&name=${encodeURIComponent(name)}`, '_blank');
+}
+
+async function deleteLog(section, name) {
+  if (!confirm(`Delete log "${name}"? This cannot be undone.`)) return;
+  try {
+    await api('/api/logs/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({section, name}),
+    });
+    refreshLogList(section);
+  } catch (e) {
+    logLine('Error deleting log: ' + e.message, true);
+  }
+}
+
 // ---------- Settings: reset ----------
 
 async function refreshSettingsTab() {
@@ -460,9 +649,30 @@ async function refreshSettingsTab() {
 // practice (one job's trunk/tenant delete stepping on the other's, the
 // second's store removal then failing with "no server with id ...").
 function setSettingsResetButtonsDisabled(disabled) {
-  ['reset-instance-1-btn', 'reset-instance-2-btn', 'reset-swarmdialer-btn', 'reset-all-btn'].forEach(id => {
+  ['reset-instance-1-btn', 'reset-instance-2-btn', 'reset-swarmdialer-btn', 'reset-all-btn', 'clear-logs-btn'].forEach(id => {
     document.getElementById(id).disabled = disabled;
   });
+}
+
+async function clearAllLogs() {
+  const btn = document.getElementById('clear-logs-btn');
+  if (btn.disabled) return;
+  if (!confirm('Delete every call log, local and remote? This cannot be undone.')) return;
+
+  setSettingsResetButtonsDisabled(true);
+  const statusEl = document.getElementById('clear-logs-status');
+  statusEl.textContent = 'Clearing...';
+  statusEl.className = 'status-line';
+  try {
+    await api('/api/settings/clear-logs', {method: 'POST'});
+    statusEl.textContent = 'All logs cleared.';
+    refreshLogList('local');
+    refreshLogList('remote');
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+  setSettingsResetButtonsDisabled(false);
 }
 
 // Starts a reset-instance job and polls it to completion, updating
