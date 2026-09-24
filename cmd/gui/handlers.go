@@ -37,8 +37,9 @@ func writeError(w http.ResponseWriter, status int, err error) {
 // --- Wizard: test connection ---
 
 type testConnectionRequest struct {
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"` // legacy (v1) API key
+	APIKeyV2 string `json:"api_key_v2"`
 }
 
 func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
@@ -51,7 +52,7 @@ func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	result, err := wizard.TestConnection(req.BaseURL, req.APIKey)
+	result, err := wizard.TestConnection(req.BaseURL, req.APIKey, req.APIKeyV2)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -68,40 +69,13 @@ func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleVerifySystemSettings checks whether a non-Multi-Tenant instance's
-// system-wide channel limit and codec allowlist have been manually raised
-// yet — see wizard.VerifySystemSettings for why this can only check, not
-// fix, either of them (both are GUI-only settings with no API write
-// path). The wizard's connect step for non-Multi-Tenant instances polls
-// this after showing its blocking "go raise these manually" prompt.
-func (a *app) handleVerifySystemSettings(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
-	var req testConnectionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	check, err := wizard.VerifySystemSettings(req.BaseURL, req.APIKey)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"channels_ok":      check.ChannelsOK,
-		"current_channels": check.CurrentChannels,
-		"codecs_ok":        check.CodecsOK,
-	})
-}
-
 // --- Wizard: provision ---
 
 type provisionRequest struct {
 	Name           string `json:"name"`
 	BaseURL        string `json:"base_url"`
-	APIKey         string `json:"api_key"`
+	APIKey         string `json:"api_key"` // legacy (v1) API key
+	APIKeyV2       string `json:"api_key_v2"`
 	ExtensionCount int    `json:"extension_count"`
 	TenantCode     string `json:"tenant_code"`
 	TenantName     string `json:"tenant_name"`
@@ -109,13 +83,6 @@ type provisionRequest struct {
 	Country        string `json:"country"`
 	National       string `json:"national"`
 	International  string `json:"international"`
-	// CodecsAvailable: for non-Multi-Tenant editions, what the wizard's
-	// verify-system-settings step (before this) determined — see
-	// wizard.VerifySystemSettings. Ignored for Multi-Tenant, which is
-	// always true (SwarmDialer sets the tenant-level codec allowlist
-	// itself). Frontend defaults this to true if the check was skipped
-	// for some reason, matching the pre-codec-selector behavior.
-	CodecsAvailable bool `json:"codecs_available"`
 }
 
 func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
@@ -137,13 +104,12 @@ func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		srv, err := wizard.Provision(a.ctx, wizard.ProvisionParams{
-			Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey,
+			Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey, APIKeyV2: req.APIKeyV2,
 			ExtensionCount: req.ExtensionCount,
 			TenantCode:     req.TenantCode, TenantName: req.TenantName,
 			ExtLength: req.ExtLength,
 			Country:   req.Country, National: req.National, International: req.International,
-			ChannelLimit: 600, MaxWait: 10 * time.Minute,
-			CodecsAvailable: req.CodecsAvailable,
+			ChannelLimit: 1000, MaxWait: 10 * time.Minute,
 		}, progress)
 		if err != nil {
 			return // progress already carries the error
@@ -226,17 +192,16 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 	// Omit API keys from what the browser sees — no reason to put them in
 	// the DOM/JS console even on a no-auth internal tool.
 	type serverView struct {
-		ID              string `json:"id"`
-		Name            string `json:"name"`
-		BaseURL         string `json:"base_url"`
-		Edition         string `json:"edition"`
-		TenantID        int    `json:"tenant_id"`
-		TenantCode      string `json:"tenant_code"`
-		ExtCount        int    `json:"extension_count"`
-		TrunkID         int    `json:"trunk_id,omitempty"`
-		PeerServerID    string `json:"peer_server_id,omitempty"`
-		DIDCount        int    `json:"did_count"`
-		CodecsAvailable bool   `json:"codecs_available"`
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		BaseURL      string `json:"base_url"`
+		Edition      string `json:"edition"`
+		TenantID     int    `json:"tenant_id"`
+		TenantCode   string `json:"tenant_code"`
+		ExtCount     int    `json:"extension_count"`
+		TrunkID      int    `json:"trunk_id,omitempty"`
+		PeerServerID string `json:"peer_server_id,omitempty"`
+		DIDCount     int    `json:"did_count"`
 	}
 	views := make([]serverView, 0, len(servers))
 	for _, s := range servers {
@@ -244,11 +209,6 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 			ID: s.ID, Name: s.Name, BaseURL: s.BaseURL, Edition: s.Edition,
 			TenantID: s.TenantID, TenantCode: s.TenantCode, ExtCount: len(s.Extensions),
 			TrunkID: s.TrunkID, PeerServerID: s.PeerServerID, DIDCount: len(s.DIDs),
-			// Multi-Tenant always has its tenant-level codec allowlist set by
-			// SwarmDialer itself (see pbxware.ResaveTenant), so this is always
-			// true for it regardless of the persisted flag — covers servers
-			// connected before CodecsAvailable existed (see store.Server).
-			CodecsAvailable: s.CodecsAvailable || strings.EqualFold(s.Edition, "Multi-Tenant"),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"servers": views})
@@ -300,8 +260,13 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 	// the last empirically-safe value found during small-scale testing;
 	// re-tune from real data as testing moves to higher call counts.
 	const rampInterval = 800 * time.Millisecond
+	// Captured once here, at batch start, rather than re-read when the
+	// batch finishes — recording is a per-batch property (whatever it was
+	// set to for these calls), not something that should reflect a toggle
+	// flip made later while the batch was still running.
+	recording, recordingKnown := a.currentRecordingStatus(req.Section, req.ServerID, req.PeerServerID)
 	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP, codec, func(records []orchestrator.CallRecord) {
-		a.reportBatch(logSection, reportLabel, reportClient, reportServerID, sess, req.Count, records)
+		a.reportBatch(logSection, reportLabel, reportClient, reportServerID, sess, req.Count, records, recording, recordingKnown)
 	})
 	writeJSON(w, http.StatusOK, map[string]int{"started": started})
 }

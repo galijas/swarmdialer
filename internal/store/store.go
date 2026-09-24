@@ -28,11 +28,12 @@ type DIDMapping struct {
 // Server is one connected PBXware instance and everything provisioned on
 // it so far.
 type Server struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
-	Edition string `json:"edition"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"` // legacy (v1) API key
+	APIKeyV2 string `json:"api_key_v2"`
+	Edition  string `json:"edition"`
 
 	// SIPHost is the actual network destination for SIP (host:port,
 	// usually the same host as BaseURL on port 5060). LocalIP is our own
@@ -43,16 +44,6 @@ type Server struct {
 
 	TenantID   int    `json:"tenant_id"` // 0 if this edition skips tenant creation
 	TenantCode string `json:"tenant_code"`
-
-	// CodecsAvailable is false only when a non-Multi-Tenant instance's
-	// system-wide codec allowlist couldn't be confirmed to include
-	// SwarmDialer's non-default codecs (g722/g729/opus) at connect time —
-	// see wizard.VerifySystemSettings and the wizard's "raise these
-	// manually" prompt for non-Multi-Tenant instances. Always true for
-	// Multi-Tenant editions, whose tenant-level codec allowlist SwarmDialer
-	// sets itself (see pbxware.ResaveTenant). The dashboard restricts the
-	// codec dropdown to ulaw-only for a server where this is false.
-	CodecsAvailable bool `json:"codecs_available"`
 
 	Extensions []pbxware.ProvisionedExtension `json:"extensions"`
 

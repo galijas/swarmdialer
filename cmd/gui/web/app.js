@@ -65,11 +65,12 @@ async function testConnection(step) {
     const req = {
       base_url: document.getElementById(prefix + '-url').value.trim(),
       api_key: document.getElementById(prefix + '-key').value.trim(),
+      api_key_v2: document.getElementById(prefix + '-key-v2').value.trim(),
     };
     const result = await api('/api/wizard/test-connection', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req),
     });
-    statusEl.textContent = `Connected. Edition: ${result.edition}. License limits — Extensions: ${result.extensions}, Tenants: ${result.tenants}, DIDs: ${result.dids}, VOIP Trunks: ${result.voip_trunks}, Channels: ${result.channels}. Note: PBXware's system-wide Local/Remote channel limits default to 246 regardless of license — raise these manually in the PBXware admin GUI (not automatable via the API) if you need more than 246 simultaneous calls.`;
+    statusEl.textContent = `Connected (legacy + v2 keys both verified). Edition: ${result.edition}. License limits — Extensions: ${result.extensions}, Tenants: ${result.tenants}, DIDs: ${result.dids}, VOIP Trunks: ${result.voip_trunks}, Channels: ${result.channels}.`;
 
     const pIdx = step;
     const editionNote = document.getElementById('p' + pIdx + '-edition-note');
@@ -78,15 +79,9 @@ async function testConnection(step) {
     tenantFields.classList.toggle('hidden', !isMultiTenant);
     editionNote.textContent = isMultiTenant
       ? 'Multi-Tenant edition detected — a tenant will be created.'
-      : `"${result.edition}" edition detected — tenant creation is skipped; extensions are created at the system level.`;
-
-    let codecsAvailable = true;
-    if (!isMultiTenant) {
-      codecsAvailable = await verifySystemSettingsFlow(req.base_url, req.api_key, statusEl);
-    }
+      : `"${result.edition}" edition detected — tenant creation is skipped; extensions are created at the system level. Channel limits and codecs are raised automatically via API v2.`;
 
     window['pending' + step] = req; // stash for provision() to reuse
-    window['codecsAvailable' + step] = codecsAvailable;
     showStep('step-provision-' + step);
     // Left disabled — this step is done and showStep moved us past it;
     // there's no way back to re-click it.
@@ -94,62 +89,6 @@ async function testConnection(step) {
     statusEl.textContent = 'Error: ' + e.message;
     statusEl.className = 'status-line error';
     btn.disabled = false;
-  }
-}
-
-// For a non-Multi-Tenant instance, PBXware's system-wide channel limit
-// (defaults to 246) and codec allowlist (defaults to ulaw/alaw/g722 —
-// missing g729/opus) are both GUI-only settings with no API write path
-// (see wizard.VerifySystemSettings) — SwarmDialer can only check whether
-// they've been raised manually, not do it itself. This blocks the wizard
-// here until the user confirms they've made both changes, actually
-// verifies it, and — if verification keeps failing — offers to skip and
-// continue with the codec selector disabled for this instance rather
-// than getting stuck. Returns whether the codec selector should be
-// enabled for this server (always true if the user never needed this
-// flow — Multi-Tenant callers don't call this at all).
-async function verifySystemSettingsFlow(baseURL, apiKey, statusEl) {
-  const askFirst = confirm(
-    'This is a non-Multi-Tenant instance. Before continuing, please raise TWO system-wide settings manually in its PBXware admin GUI, right now:\n\n' +
-    '1. Local/Remote channel limits — raise to 512 (default is 246).\n' +
-    '2. Codec allowlist (Local/Remote codecs) — add g722, g729, and opus.\n\n' +
-    'Click OK once you\'ve made BOTH changes, or Cancel to go do it and come back later.'
-  );
-  if (!askFirst) {
-    statusEl.textContent = 'Waiting — raise the channel limit and codec allowlist on this instance, then click Next again.';
-    statusEl.className = 'status-line error';
-    throw new Error('system settings not yet raised'); // caught by testConnection's catch, re-enables the Next button
-  }
-
-  while (true) {
-    statusEl.textContent = 'Checking channel limits and codec allowlist...';
-    let check;
-    try {
-      check = await api('/api/wizard/verify-system-settings', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({base_url: baseURL, api_key: apiKey}),
-      });
-    } catch (e) {
-      check = {channels_ok: false, codecs_ok: false, current_channels: 0};
-    }
-
-    if (check.channels_ok && check.codecs_ok) {
-      statusEl.textContent = 'Channel limits and codec allowlist confirmed — continuing.';
-      statusEl.className = 'status-line';
-      return true;
-    }
-
-    const retry = confirm(
-      'Still not detected:\n' +
-      `- Channels: ${check.current_channels}/512 — ${check.channels_ok ? 'OK' : 'NOT raised yet'}\n` +
-      `- Codec allowlist (g722/g729/opus): ${check.codecs_ok ? 'OK' : 'NOT raised yet'}\n\n` +
-      'Click OK to check again after making the change(s), or Cancel to skip and continue without codec selector support for this instance (calls will stay capped at the default 246 channels).'
-    );
-    if (!retry) {
-      statusEl.textContent = 'Skipped — codec selector will be disabled for this instance, and calls will stay capped at the default 246 channels.';
-      statusEl.className = 'status-line error';
-      return false;
-    }
   }
 }
 
@@ -171,6 +110,7 @@ async function provision(step) {
     name: document.getElementById('c' + step + '-name').value.trim(),
     base_url: pending.base_url,
     api_key: pending.api_key,
+    api_key_v2: pending.api_key_v2,
     extension_count: parseInt(document.getElementById('p' + step + '-ext-count').value, 10),
     tenant_code: document.getElementById('p' + step + '-tenant-code').value.trim(),
     tenant_name: document.getElementById('p' + step + '-tenant-name').value.trim(),
@@ -180,7 +120,6 @@ async function provision(step) {
     // already require anyway (see wizard.Provision's digit-length
     // detection for those).
     ext_length: 4, country: '869', national: '1', international: '011',
-    codecs_available: window['codecsAvailable' + step] !== false,
   };
 
   try {
@@ -284,11 +223,8 @@ async function connectServers() {
 
 // ---------- Dashboard: server list ----------
 
-let lastServers = []; // last-fetched /api/servers result, kept for codec-dropdown lookups
-
 async function refreshServerList() {
   const {servers} = await api('/api/servers');
-  lastServers = servers;
   const list = document.getElementById('server-list');
   list.innerHTML = '';
   servers.forEach(s => {
@@ -319,41 +255,8 @@ async function refreshServerList() {
 
   document.getElementById('remote-dialer-panel').classList.toggle('disabled-overlay', pairs.length === 0);
 
-  updateCodecDropdown('local');
-  updateCodecDropdown('remote');
-}
-
-// Restricts a dialer's codec dropdown to ulaw-only when the server(s) it
-// would dial through don't have SwarmDialer's other codecs confirmed
-// available — see the wizard's verify-system-settings step for
-// non-Multi-Tenant instances (store.Server.CodecsAvailable). For remote,
-// this checks *both* sides of the pair, since the callee's instance has
-// to accept the offered codec too.
-function updateCodecDropdown(section) {
-  const select = document.getElementById(section + '-codec');
-  if (!select) return;
-  const byID = new Map(lastServers.map(s => [s.id, s]));
-
-  let available = true;
-  if (section === 'local') {
-    const srv = byID.get(document.getElementById('local-server-select').value);
-    available = !srv || srv.codecs_available;
-  } else {
-    const pairValue = document.getElementById('remote-pair-select').value;
-    if (pairValue) {
-      const [callerID, calleeID] = pairValue.split(':');
-      const caller = byID.get(callerID), callee = byID.get(calleeID);
-      available = (!caller || caller.codecs_available) && (!callee || callee.codecs_available);
-    }
-  }
-
-  Array.from(select.options).forEach(opt => {
-    opt.disabled = !available && opt.value !== 'ulaw';
-  });
-  if (!available && select.value !== 'ulaw') {
-    select.value = 'ulaw';
-  }
-  select.title = available ? '' : 'Only G.711 (ulaw) is available — this instance\'s codec allowlist wasn\'t confirmed during setup (Settings > re-add the instance to retry).';
+  refreshRecordingStatus('local');
+  refreshRecordingStatus('remote');
 }
 
 function populateSelect(id, options) {
@@ -419,6 +322,110 @@ function confirmStop(section) {
   }).then(r => {
     logLine(r.stopped ? `Stopped all ${section} calls.` : `No active ${section} session to stop.`);
   }).catch(e => logLine('Error: ' + e.message, true));
+}
+
+// ---------- Dashboard: recording ----------
+//
+// Recording is a property of the target PBXware instance (via API v2), not
+// of SwarmDialer's own session state, so its controls always reflect
+// whatever the server/pair selection currently resolves to — refreshed on
+// selection change and right after every toggle/change, rather than
+// tracked as separate local UI state that could drift from what PBXware
+// actually has set.
+
+// Same target resolution as dialerTarget, but silent on "nothing selected"
+// (returns null) instead of logging to Live Status — refreshRecordingStatus
+// runs on every server-list refresh, including the ordinary case of a
+// single server with no remote pair yet, and that isn't an error worth a
+// log line.
+function recordingDialerTarget(section) {
+  if (section === 'remote') {
+    const pairValue = document.getElementById('remote-pair-select').value;
+    if (!pairValue) return null;
+    const [serverID, peerServerID] = pairValue.split(':');
+    return {serverID, peerServerID};
+  }
+  const serverID = document.getElementById('local-server-select').value;
+  if (!serverID) return null;
+  return {serverID, peerServerID: undefined};
+}
+
+function applyRecordingState(section, st) {
+  const toggleBtn = document.getElementById(section + '-recording-toggle');
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  toggleBtn.textContent = st.enabled ? 'Disable Recording' : 'Enable Recording';
+  toggleBtn.classList.toggle('recording-on', st.enabled);
+  stereoCb.checked = st.stereo_enabled;
+  stereoCb.disabled = !st.enabled;
+  formatSel.disabled = !st.enabled;
+  if (st.format) formatSel.value = st.format;
+}
+
+async function refreshRecordingStatus(section) {
+  const toggleBtn = document.getElementById(section + '-recording-toggle');
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  const statusEl = document.getElementById(section + '-recording-status');
+  const target = recordingDialerTarget(section);
+  if (!target) {
+    toggleBtn.disabled = true;
+    stereoCb.disabled = true;
+    formatSel.disabled = true;
+    statusEl.textContent = '';
+    return;
+  }
+  toggleBtn.disabled = false;
+  try {
+    const st = await api(`/api/recording/status?section=${section}&server_id=${encodeURIComponent(target.serverID)}&peer_server_id=${encodeURIComponent(target.peerServerID || '')}`);
+    applyRecordingState(section, st);
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = 'Error loading recording status: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+}
+
+async function setRecordingState(section, target, enabled, stereo, format, statusEl) {
+  statusEl.textContent = 'Updating...';
+  statusEl.className = 'status-line';
+  try {
+    const st = await api('/api/recording/toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        section, server_id: target.serverID, peer_server_id: target.peerServerID,
+        enabled, stereo, format,
+      }),
+    });
+    applyRecordingState(section, st);
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+}
+
+function toggleRecording(section) {
+  const target = recordingDialerTarget(section);
+  if (!target) return;
+  const toggleBtn = document.getElementById(section + '-recording-toggle');
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  const statusEl = document.getElementById(section + '-recording-status');
+  const enabling = toggleBtn.textContent === 'Enable Recording';
+  setRecordingState(section, target, enabling, enabling && stereoCb.checked, formatSel.value, statusEl);
+}
+
+// Fires when the stereo checkbox or format dropdown changes — both are
+// only enabled while recording itself is already on, so this always sends
+// enabled:true alongside whatever changed.
+function onRecordingChange(section) {
+  const target = recordingDialerTarget(section);
+  if (!target) return;
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  const statusEl = document.getElementById(section + '-recording-status');
+  setRecordingState(section, target, true, stereoCb.checked, formatSel.value, statusEl);
 }
 
 // ---------- Dashboard: live status ----------

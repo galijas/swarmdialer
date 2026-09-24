@@ -39,17 +39,23 @@ type ConnectionResult struct {
 	LocalIP string // auto-detected — see netutil.DetectLocalIP
 }
 
-// TestConnection validates a PBXware base URL + API key by making a
-// lightweight read call (license.info) and detects the local IP to
-// advertise for SIP on this connection. PBXware API keys appear to be
-// all-or-nothing admin keys (no separate read/write scoping observed), so
-// a successful read is treated as sufficient confirmation of write access
-// too — see docs/gui_spec.md's open-question note on this.
-func TestConnection(baseURL, apiKey string) (ConnectionResult, error) {
+// TestConnection validates a PBXware base URL + both API keys (legacy v1
+// and v2 — every instance needs both now, see ProvisionParams) by making a
+// lightweight read call on each (v1's license.info, v2's GetTenant against
+// SystemTenantID) and detects the local IP to advertise for SIP on this
+// connection. PBXware API keys appear to be all-or-nothing admin keys (no
+// separate read/write scoping observed), so a successful read is treated
+// as sufficient confirmation of write access too — see docs/gui_spec.md's
+// open-question note on this.
+func TestConnection(baseURL, apiKey, apiKeyV2 string) (ConnectionResult, error) {
 	client := pbxware.NewClient(baseURL, apiKey)
 	license, err := client.GetLicenseInfo()
 	if err != nil {
-		return ConnectionResult{}, fmt.Errorf("connecting to %s: %w", baseURL, err)
+		return ConnectionResult{}, fmt.Errorf("connecting to %s (legacy API key): %w", baseURL, err)
+	}
+	clientV2 := pbxware.NewClientV2(baseURL, apiKeyV2)
+	if _, err := clientV2.GetTenant(pbxware.SystemTenantID); err != nil {
+		return ConnectionResult{}, fmt.Errorf("connecting to %s (API v2 key): %w", baseURL, err)
 	}
 	localIP, err := netutil.DetectLocalIP(SIPHostFrom(baseURL))
 	if err != nil {
@@ -99,7 +105,8 @@ func (p *ProvisionProgress) Snapshot() ProvisionProgressSnapshot {
 type ProvisionParams struct {
 	Name           string // display name for this server
 	BaseURL        string
-	APIKey         string
+	APIKey         string // legacy (v1) API key
+	APIKeyV2       string
 	ExtensionCount int
 	// Tenant creation fields — ignored (and tenant creation skipped) if
 	// the license's edition isn't Multi-Tenant. Package is not a field
@@ -114,13 +121,6 @@ type ProvisionParams struct {
 	International string
 	ChannelLimit  int // raised from PBXware's 8 default — see pbxware.ResaveTenant
 	MaxWait       time.Duration
-	// CodecsAvailable is only meaningful for non-Multi-Tenant editions —
-	// what the wizard's verify-system-settings step determined about this
-	// instance's system-wide codec allowlist (see
-	// pbxware.VerifySystemSettings). Multi-Tenant always ends up true
-	// regardless of this field, since Provision sets the tenant-level
-	// allowlist itself.
-	CodecsAvailable bool
 }
 
 // Provision creates (or, for non-Multi-Tenant editions, skips) a tenant
@@ -132,6 +132,7 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 	progress.set(func() { progress.total = p.ExtensionCount; progress.message = "connecting" })
 
 	client := pbxware.NewClient(p.BaseURL, p.APIKey)
+	clientV2 := pbxware.NewClientV2(p.BaseURL, p.APIKeyV2)
 
 	license, err := client.GetLicenseInfo()
 	if err != nil {
@@ -147,18 +148,14 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 
 	isMultiTenant := license.IsMultiTenant()
 	srv := &store.Server{
-		ID:      fmt.Sprintf("srv-%d", time.Now().UnixNano()),
-		Name:    p.Name,
-		BaseURL: p.BaseURL,
-		APIKey:  p.APIKey,
-		Edition: license.Edition,
-		SIPHost: SIPHostFrom(p.BaseURL),
-		LocalIP: localIP,
-		// Multi-Tenant always ends up true (Provision sets the
-		// tenant-level codec allowlist itself, below); non-Multi-Tenant
-		// carries through whatever the wizard's earlier verify-system-
-		// settings step determined.
-		CodecsAvailable: isMultiTenant || p.CodecsAvailable,
+		ID:       fmt.Sprintf("srv-%d", time.Now().UnixNano()),
+		Name:     p.Name,
+		BaseURL:  p.BaseURL,
+		APIKey:   p.APIKey,
+		APIKeyV2: p.APIKeyV2,
+		Edition:  license.Edition,
+		SIPHost:  SIPHostFrom(p.BaseURL),
+		LocalIP:  localIP,
 	}
 
 	tenantID := 1            // system level — used directly for non-Multi-Tenant editions
@@ -323,6 +320,32 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 			progress.set(func() { progress.done = true; progress.err = err.Error() })
 			return nil, fmt.Errorf("resaving tenant (second pass): %w", err)
 		}
+	}
+
+	// System-level config, via v2 (see pbxware.SystemTenantID): RAM disk is
+	// needed on every instance for stereo call recording to work at all
+	// (both editions — stereo recording is always system-level, never
+	// per-tenant, see ClientV2's doc comment); non-Multi-Tenant additionally
+	// gets its system-wide channel limit and codec allowlist raised here,
+	// since it has no per-tenant equivalent of Multi-Tenant's
+	// ResaveTenant/per-extension acodecs to do that job instead.
+	progress.set(func() { progress.message = "raising system-level channels/codecs/recording settings (v2)" })
+	systemPatch := map[string]any{
+		"call_recordings": map[string]any{
+			"use_ram_disk":  "yes",
+			"ram_disk_size": 512,
+		},
+	}
+	if !isMultiTenant {
+		systemPatch["channels_limit"] = map[string]any{"local": 1000, "remote": 1000}
+		systemPatch["codecs"] = map[string]any{
+			"local":  pbxware.SwarmDialerCodecsList,
+			"remote": pbxware.SwarmDialerCodecsList,
+		}
+	}
+	if _, err := clientV2.PatchTenant(pbxware.SystemTenantID, systemPatch); err != nil {
+		progress.set(func() { progress.done = true; progress.err = err.Error() })
+		return nil, fmt.Errorf("raising system-level settings via API v2: %w", err)
 	}
 
 	progress.set(func() { progress.done = true; progress.message = "done" })

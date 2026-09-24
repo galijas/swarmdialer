@@ -265,6 +265,11 @@ func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, erro
 // matching both fields' documented request format.
 const SwarmDialerCodecs = "ulaw:alaw:g722:g729:opus"
 
+// SwarmDialerCodecsList is SwarmDialerCodecs as a slice — v2's codecs
+// fields (ClientV2.PatchTenant) take real JSON arrays instead of a
+// colon-separated string.
+var SwarmDialerCodecsList = []string{"ulaw", "alaw", "g722", "g729", "opus"}
+
 func (c *Client) ResaveTenant(tenantID, limit, extLength int, maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	delay := 5 * time.Second
@@ -439,8 +444,7 @@ type ExtensionConfig struct {
 	// AllowedCodecsRaw is the extension's "allow" list as PBXware reports
 	// it back (e.g. "ulaw,0 alaw,0 g722,0"), not just what was requested —
 	// a per-extension acodecs value can only include what the system (or,
-	// for Multi-Tenant, the tenant) already allows, so this is how
-	// callers confirm what actually stuck (see wizard.VerifySystemSettings).
+	// for Multi-Tenant, the tenant) already allows.
 	AllowedCodecsRaw string
 }
 

@@ -95,7 +95,6 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.Handle("/", http.FileServer(http.FS(webRoot)))
 
 	mux.HandleFunc("/api/wizard/test-connection", a.handleTestConnection)
-	mux.HandleFunc("/api/wizard/verify-system-settings", a.handleVerifySystemSettings)
 	mux.HandleFunc("/api/wizard/provision", a.handleProvision)
 	mux.HandleFunc("/api/wizard/provision/status", a.handleProvisionStatus)
 	mux.HandleFunc("/api/wizard/connect", a.handleConnect)
@@ -112,6 +111,8 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logs/view", a.handleViewLog)
 	mux.HandleFunc("/api/logs/download", a.handleDownloadLog)
 	mux.HandleFunc("/api/logs/delete", a.handleDeleteLog)
+	mux.HandleFunc("/api/recording/status", a.handleRecordingStatus)
+	mux.HandleFunc("/api/recording/toggle", a.handleRecordingToggle)
 	mux.Handle("/ws/status", a.sessionWSHandler())
 }
 

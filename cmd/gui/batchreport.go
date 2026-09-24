@@ -120,7 +120,12 @@ type callLogEntry struct {
 // against — always the *caller's* instance (for a remote batch, that's
 // server1's own API, not the callee's — a cross-instance call's CDR is
 // recorded on the side that originated it).
-func (a *app) reportBatch(section logstore.Section, label string, client *pbxware.Client, serverID int, sess *orchestrator.Session, requestedN int, records []orchestrator.CallRecord) {
+//
+// recording is this batch's recording state as of when it started (see
+// handleDial) — best-effort (recordingKnown is false if the lookup
+// failed), logged alongside the summary since it's a per-batch, not
+// per-call, property.
+func (a *app) reportBatch(section logstore.Section, label string, client *pbxware.Client, serverID int, sess *orchestrator.Session, requestedN int, records []orchestrator.CallRecord, recording recordingStatusResponse, recordingKnown bool) {
 	sort.Slice(records, func(i, j int) bool { return records[i].StartedAt.Before(records[j].StartedAt) })
 
 	entries := make([]callLogEntry, len(records))
@@ -149,7 +154,7 @@ func (a *app) reportBatch(section logstore.Section, label string, client *pbxwar
 		}
 	}
 
-	a.writeBatchLog(section, label, requestedN, entries)
+	a.writeBatchLog(section, label, requestedN, entries, recording, recordingKnown)
 	sess.LogBatchQuality(batchQualitySummary(entries))
 }
 
@@ -202,6 +207,24 @@ func batchQualitySummary(entries []callLogEntry) string {
 	return strings.Join(lines, "; ")
 }
 
+// formatRecordingStatus describes this batch's recording state (a
+// per-batch property, set via the dashboard's recording toggle — see
+// cmd/gui/recording.go — not something each individual call line needs to
+// repeat) for the log header.
+func formatRecordingStatus(recording recordingStatusResponse, known bool) string {
+	if !known {
+		return "unknown (status lookup failed)"
+	}
+	if !recording.Enabled {
+		return "off"
+	}
+	channels := "mono"
+	if recording.StereoEnabled {
+		channels = "stereo"
+	}
+	return fmt.Sprintf("on, %s, codec=%s", channels, recording.Format)
+}
+
 func latenciesOf(records []orchestrator.CallRecord) []time.Duration {
 	out := make([]time.Duration, len(records))
 	for i, r := range records {
@@ -215,7 +238,7 @@ func latenciesOf(records []orchestrator.CallRecord) []time.Duration {
 // matching what's shown in Live Status, plus extra per-call fields worth
 // having in a log even though the dashboard doesn't show them live
 // (exact timestamps, codec, RTP counts).
-func (a *app) writeBatchLog(section logstore.Section, label string, requestedN int, entries []callLogEntry) {
+func (a *app) writeBatchLog(section logstore.Section, label string, requestedN int, entries []callLogEntry, recording recordingStatusResponse, recordingKnown bool) {
 	f, _, err := a.logs.CreateBatchLog(section, label)
 	if err != nil {
 		return // logging is best-effort — never block/fail the actual call batch over it
@@ -226,7 +249,8 @@ func (a *app) writeBatchLog(section logstore.Section, label string, requestedN i
 	fmt.Fprintf(f, "SwarmDialer batch log\n")
 	fmt.Fprintf(f, "Section: %s\n", section)
 	fmt.Fprintf(f, "Target:  %s\n", label)
-	fmt.Fprintf(f, "Requested: %d calls, started: %d\n\n", requestedN, len(entries))
+	fmt.Fprintf(f, "Requested: %d calls, started: %d\n", requestedN, len(entries))
+	fmt.Fprintf(f, "Recording: %s\n\n", formatRecordingStatus(recording, recordingKnown))
 	fmt.Fprintf(f, "=== Calls ===\n")
 	for _, e := range entries {
 		mosStr := "mos=n/a"

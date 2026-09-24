@@ -49,10 +49,14 @@ const swarmDialerPackageLimit = 2000
 
 // packageParams builds the pbxware.package.add/edit request body for
 // SwarmDialer's fixed load-testing profile: generous limits everywhere,
-// every optional feature (call recording, monitoring, call screening,
-// restricted service plans) turned off, since none of it matters for load
-// testing and only adds noise/risk of hitting a limit unrelated to what's
-// actually being tested.
+// every optional feature except call recording (monitoring, call
+// screening, restricted service plans) turned off, since none of the rest
+// matters for load testing and only adds noise/risk of hitting a limit
+// unrelated to what's actually being tested. Call recording is on so
+// tenants created against this package can use the dashboard's recording
+// toggle (see cmd/gui/handlers.go's recording endpoints) — the toggle
+// itself still separately enables/disables it per tenant via v2's
+// call_recordings.enabled; this just makes that option exist at all.
 //
 // Required field names are a different shape than what
 // package.configuration reports back for the same values (pluralized/
@@ -71,7 +75,7 @@ func packageParams(name string) url.Values {
 		"rgroups":         {limit}, // ring groups
 		"hot_desking":     {limit},
 		"restrict_splans": {"0"}, // restrict service plans: no
-		"call_recordings": {"0"},
+		"call_recordings": {"1"},
 		"monitoring":      {"0"},
 		"call_screening":  {"0"},
 	}
