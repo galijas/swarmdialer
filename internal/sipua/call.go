@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -47,6 +48,10 @@ type Phone struct {
 	Endpoint     Endpoint
 	LocalIP      string
 	LocalPort    int
+
+	// preferredCodec (a Codec, or unset) is the codec this phone answers
+	// with when the offer includes it — see SetPreferredCodec.
+	preferredCodec atomic.Value
 
 	// calls maps Call-ID -> *RTPSession for calls currently active on this
 	// phone, so the OnBye handler (which only sees a *sip.Request, not our
@@ -141,6 +146,20 @@ func NewPhone(ctx context.Context, localIP string, localPort int, ep Endpoint) (
 	return p, nil
 }
 
+// SetPreferredCodec sets the codec this phone answers its next call with
+// when the offer includes it, instead of the offer's first codec. Set by
+// the dialer to the codec the test call uses: on a remote call the far
+// PBXware offers its whole codec list, ulaw first, whatever codec the call
+// arrived with over the trunk — answering ulaw then forced PBXware to
+// transcode (and a G.729 call, which it can't transcode, failed with 603;
+// confirmed live 2026-09-26).
+func (p *Phone) SetPreferredCodec(c Codec) { p.preferredCodec.Store(c) }
+
+func (p *Phone) preferred() Codec {
+	c, _ := p.preferredCodec.Load().(Codec)
+	return c
+}
+
 // Close shuts down the phone's client and server.
 func (p *Phone) Close() {
 	p.Client.Close()
@@ -184,10 +203,11 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 			return
 		}
 		sendMedia := sdpWantsMedia(req.Body())
-		codec, err := parseSDPCodec(req.Body())
+		codec, payloadType, err := parseSDPCodec(req.Body(), p.preferred())
 		if err != nil {
 			log.Printf("sipua: %s: parsing caller's offered codec, defaulting to %s: %v", p.Endpoint.AOR, DefaultCodec, err)
 			codec = DefaultCodec
+			payloadType = codec.spec().payloadType
 		}
 
 		rtpSession, err := NewRTPSession(0, codec)
@@ -200,8 +220,11 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 			rtpSession.Stop()
 			return
 		}
+		// Answer with, and send using, the offer's payload type number
+		// (see buildSDP).
+		rtpSession.SetPayloadType(payloadType)
 
-		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia, codec)
+		sdp := buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia, codec, payloadType)
 		if err := dlg.RespondSDP(sdp); err != nil {
 			log.Printf("sipua: %s: responding 200 with SDP: %v", p.Endpoint.AOR, err)
 			rtpSession.Stop()
@@ -254,7 +277,7 @@ func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestina
 
 	req := sip.NewRequest(sip.INVITE, recipient)
 	req.SetDestination(dialDestination)
-	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia, codec))
+	req.SetBody(buildSDP(p.LocalIP, rtpSession.LocalPort(), sendMedia, codec, codec.spec().payloadType))
 	req.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
 
 	// Same identity fix as Register: without an explicit From, sipgo
@@ -297,6 +320,12 @@ func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestina
 	if err := rtpSession.SetRemote(remoteIP, remotePort); err != nil {
 		rtpSession.Stop()
 		return nil, fmt.Errorf("setting RTP remote: %w", err)
+	}
+	// Send using the payload type number the answer declared for our
+	// codec — an SDP's numbers say what that side expects to receive
+	// (PBXware answers an opus offer of 111 with 107).
+	if answered, pt, err := parseSDPCodec(sess.InviteResponse.Body(), codec); err == nil && answered == codec {
+		rtpSession.SetPayloadType(pt)
 	}
 	if sendMedia {
 		rtpSession.Start(ctx)

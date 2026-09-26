@@ -112,12 +112,12 @@ func IsValidCodec(c Codec) bool {
 
 // rtpmapLine returns this codec's "a=rtpmap:..." SDP attribute line body
 // (without the leading "a=rtpmap:" — callers already have that).
-func (c Codec) rtpmapLine() string {
+func (c Codec) rtpmapLine(payloadType uint8) string {
 	s := c.spec()
 	if s.channelsForSDP > 0 {
-		return fmt.Sprintf("%d %s/%d/%d", s.payloadType, s.rtpmapName, s.clockRateForSDP, s.channelsForSDP)
+		return fmt.Sprintf("%d %s/%d/%d", payloadType, s.rtpmapName, s.clockRateForSDP, s.channelsForSDP)
 	}
-	return fmt.Sprintf("%d %s/%d", s.payloadType, s.rtpmapName, s.clockRateForSDP)
+	return fmt.Sprintf("%d %s/%d", payloadType, s.rtpmapName, s.clockRateForSDP)
 }
 
 // --- G.711 u-law (stateless — fixed silence byte) ---

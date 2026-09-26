@@ -10,10 +10,9 @@ import (
 	"swarmdialer/internal/store"
 )
 
-// resetTenantGoneWait bounds how long ResetInstance waits for a deleted
-// tenant to actually disappear before touching the shared package —
-// tenant deletion is as slow as tenant creation on this system (minutes,
-// not seconds), so this needs real headroom, not a token pause.
+// resetTenantGoneWait bounds how long ResetInstance waits for a tenant to
+// disappear when the delete request itself failed (see ResetInstance) —
+// on slow hardware a tenant delete took minutes, so this keeps headroom.
 const resetTenantGoneWait = 5 * time.Minute
 
 // ResetProgress reports live progress of ResetInstance — same
@@ -79,6 +78,7 @@ func (p *ResetProgress) AppendWarning(w string) {
 func ResetInstance(srv *store.Server, progress *ResetProgress) {
 	var warnings []string
 	client := pbxware.NewClient(srv.BaseURL, srv.APIKey)
+	clientV2 := pbxware.NewClientV2(srv.BaseURL, srv.APIKeyV2)
 
 	if srv.TrunkID != 0 {
 		progress.set(func() { progress.message = fmt.Sprintf("deleting trunk %d", srv.TrunkID) })
@@ -90,52 +90,31 @@ func ResetInstance(srv *store.Server, progress *ResetProgress) {
 	if isMultiTenantEdition(srv.Edition) {
 		if srv.TenantID != 0 {
 			progress.set(func() { progress.message = fmt.Sprintf("deleting tenant %d", srv.TenantID) })
-			// tenant.delete frequently outlasts the 30s HTTP client timeout
-			// even when it succeeds server-side — the same behavior already
-			// documented on AddTenant for tenant.add. A timeout/transport
-			// error here does NOT mean the tenant is still there, so it's
-			// recorded as a warning but doesn't skip the wait-for-gone
-			// check below — that check is the only way to find out what
-			// actually happened, and skipping it (as an earlier version of
-			// this function did) meant the package delete right after would
-			// run while the tenant might still be present, failing with
-			// "Cannot delete package that is currently assigned to
-			// tenants" instead of the real problem being visible.
-			if err := client.DeleteTenant(srv.TenantID); err != nil {
+			// v2's tenant delete is synchronous (204 once the tenant and
+			// its extensions are gone, ~2.5s live), so the package delete
+			// below can follow straight away. If the request itself fails
+			// (e.g. a timeout) the tenant may still be going away, so wait
+			// for it to disappear before touching the package.
+			if err := clientV2.DeleteTenant(srv.TenantID); err != nil {
 				warnings = append(warnings, fmt.Sprintf("deleting tenant %d: %v", srv.TenantID, err))
-			}
-			progress.set(func() {
-				progress.message = fmt.Sprintf("waiting for tenant %d to finish deleting (can take several minutes)", srv.TenantID)
-			})
-			if err := client.WaitForTenantGone(srv.TenantID, resetTenantGoneWait); err != nil {
-				warnings = append(warnings, fmt.Sprintf("waiting for tenant %d to finish deleting: %v", srv.TenantID, err))
-			}
-		}
-		progress.set(func() { progress.message = "deleting shared tenant package" })
-		packages, err := client.ListPackages()
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("listing packages: %v", err))
-		} else {
-			for id, name := range packages {
-				if name == pbxware.SwarmDialerPackageName {
-					if err := client.DeletePackage(id); err != nil {
-						warnings = append(warnings, fmt.Sprintf("deleting package %d: %v", id, err))
-					}
-					break
+				progress.set(func() {
+					progress.message = fmt.Sprintf("waiting for tenant %d to finish deleting", srv.TenantID)
+				})
+				if err := client.WaitForTenantGone(srv.TenantID, resetTenantGoneWait); err != nil {
+					warnings = append(warnings, fmt.Sprintf("waiting for tenant %d to finish deleting: %v", srv.TenantID, err))
 				}
 			}
 		}
-	} else {
-		total := len(srv.Extensions)
-		for i, ext := range srv.Extensions {
-			num, extNum := i+1, ext.Ext
-			progress.set(func() {
-				progress.message = fmt.Sprintf("deleting extension %s (%d/%d)", extNum, num, total)
-			})
-			if err := client.DeleteExtension(1, ext.ExtensionID); err != nil {
-				warnings = append(warnings, fmt.Sprintf("deleting extension %s: %v", extNum, err))
+		progress.set(func() { progress.message = "deleting shared tenant package" })
+		if id, ok, err := clientV2.FindSwarmDialerPackage(); err != nil {
+			warnings = append(warnings, fmt.Sprintf("listing packages: %v", err))
+		} else if ok {
+			if err := clientV2.DeletePackage(id); err != nil {
+				warnings = append(warnings, fmt.Sprintf("deleting package %d: %v", id, err))
 			}
 		}
+	} else {
+		warnings = append(warnings, deleteExtensions(clientV2, srv.Extensions, progress)...)
 	}
 
 	progress.set(func() {
@@ -143,4 +122,64 @@ func ResetInstance(srv *store.Server, progress *ResetProgress) {
 		progress.message = "done"
 		progress.warning = strings.Join(warnings, "; ")
 	})
+}
+
+// resetDeleteWorkers is how many extension deletes run at once. v2 has no
+// batch delete and one delete takes ~300-500ms, so 1000 one at a time took
+// over 5 minutes (confirmed live 2026-09-25). PBXware doesn't really
+// support concurrent deletes: at 10 at once ~77% failed with "Unable to
+// delete extension" (500); at 2-3 at once roughly 1 in 10 does, while
+// throughput still scales. Kept at 2 (not 3) for headroom on slower
+// hardware — reset speed matters little. Each worker retries its own
+// failures (see deleteExtensionWithRetry).
+const resetDeleteWorkers = 2
+
+// deleteExtensionWithRetry retries a delete that PBXware rejected because
+// another delete was in flight at the same time.
+func deleteExtensionWithRetry(clientV2 *pbxware.ClientV2, id int) error {
+	var err error
+	for attempt := 1; attempt <= 6; attempt++ {
+		if err = clientV2.DeleteExtension(pbxware.DefaultOrg, id); err == nil {
+			return nil
+		}
+		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+	}
+	return err
+}
+
+// deleteExtensions deletes every extension in exts (non-Multi-Tenant
+// editions only — on Multi-Tenant the tenant delete takes them with it),
+// returning one warning per failure.
+func deleteExtensions(clientV2 *pbxware.ClientV2, exts []pbxware.ProvisionedExtension, progress *ResetProgress) []string {
+	var (
+		mu       sync.Mutex
+		warnings []string
+		done     int
+		wg       sync.WaitGroup
+	)
+	total := len(exts)
+	jobs := make(chan pbxware.ProvisionedExtension)
+	for w := 0; w < resetDeleteWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ext := range jobs {
+				err := deleteExtensionWithRetry(clientV2, ext.ExtensionID)
+				mu.Lock()
+				done++
+				if err != nil {
+					warnings = append(warnings, fmt.Sprintf("deleting extension %s: %v", ext.Ext, err))
+				}
+				n := done
+				mu.Unlock()
+				progress.set(func() { progress.message = fmt.Sprintf("deleting extensions (%d/%d)", n, total) })
+			}
+		}()
+	}
+	for _, ext := range exts {
+		jobs <- ext
+	}
+	close(jobs)
+	wg.Wait()
+	return warnings
 }

@@ -22,7 +22,17 @@ type SessionConfig struct {
 	BaseLocalPort   int
 	RegisterTimeout time.Duration
 	DialTimeout     time.Duration
+	// OnRegisterProgress, if non-nil, is called as each extension finishes
+	// its initial registration (see RegisterProgressFunc).
+	OnRegisterProgress RegisterProgressFunc
 }
+
+// RegisterProgressFunc reports a pool's initial registration progress:
+// how many of total extensions have registered and how many failed so far.
+// side is "" for a local session's single pool, or "caller"/"callee" for a
+// remote session's two. Called from many goroutines at once; it must be
+// safe for concurrent use and cheap.
+type RegisterProgressFunc func(side string, registered, failed, total int)
 
 // pool is one registered, auto-answering set of extensions on one PBXware
 // server. A local Session has one pool shared as both caller and callee;
@@ -34,7 +44,7 @@ type pool struct {
 	sipDomain       string
 }
 
-func newPool(ctx context.Context, localIP string, basePort int, registerTimeout time.Duration, dialDestination, sipDomain string, endpoints []sipua.Endpoint) (*pool, error) {
+func newPool(ctx context.Context, localIP string, basePort int, registerTimeout time.Duration, dialDestination, sipDomain string, endpoints []sipua.Endpoint, progress func(registered, failed, total int)) (*pool, error) {
 	if sipDomain == "" {
 		sipDomain = dialDestination
 	}
@@ -50,7 +60,7 @@ func newPool(ctx context.Context, localIP string, basePort int, registerTimeout 
 		order = append(order, ep.AOR)
 	}
 
-	if err := registerPhonesStaggered(ctx, registerTimeout, dialDestination, sipDomain, phones, order); err != nil {
+	if err := registerPhonesStaggered(ctx, registerTimeout, dialDestination, sipDomain, phones, order, progress); err != nil {
 		return nil, err
 	}
 	log.Printf("session: %d extensions registered against %s", len(phones), dialDestination)
@@ -82,8 +92,17 @@ func newPool(ctx context.Context, localIP string, basePort int, registerTimeout 
 // between each (see orchestrator.go's registerAll for why — PBXware
 // rejects a chunk of otherwise-valid REGISTERs when hit fully
 // concurrently).
-func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDestination, sipDomain string, phones map[string]*sipua.Phone, order []string) error {
+func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDestination, sipDomain string, phones map[string]*sipua.Phone, order []string, progress func(registered, failed, total int)) error {
 	const registerStagger = 20 * time.Millisecond
+
+	var registered, failedCount atomic.Int64
+	total := len(order)
+	report := func() {
+		if progress != nil {
+			progress(int(registered.Load()), int(failedCount.Load()), total)
+		}
+	}
+	report() // 0/total, so the caller can show registration has started
 
 	var wg sync.WaitGroup
 	errs := make([]error, len(order))
@@ -101,7 +120,11 @@ func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDes
 			defer cancel()
 			if _, err := phone.Register(regCtx, dialDestination, sipDomain, 300); err != nil {
 				errs[i] = fmt.Errorf("registering %s: %w", phone.Endpoint.AOR, err)
+				failedCount.Add(1)
+			} else {
+				registered.Add(1)
 			}
+			report()
 		}(i, phones[aor])
 	}
 	wg.Wait()
@@ -254,7 +277,7 @@ type Session struct {
 // PBXware server, sets each to auto-answer, and returns a Session ready
 // for AddCalls, dialing between each other directly by extension number.
 func NewSession(ctx context.Context, cfg SessionConfig, endpoints []sipua.Endpoint) (*Session, error) {
-	p, err := newPool(ctx, cfg.LocalIP, cfg.BaseLocalPort, cfg.RegisterTimeout, cfg.DialDestination, cfg.SIPDomain, endpoints)
+	p, err := newPool(ctx, cfg.LocalIP, cfg.BaseLocalPort, cfg.RegisterTimeout, cfg.DialDestination, cfg.SIPDomain, endpoints, sideProgress(cfg.OnRegisterProgress, ""))
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +300,16 @@ type RemoteSessionConfig struct {
 	CalleeBasePort                         int
 	RegisterTimeout                        time.Duration
 	DialTimeout                            time.Duration
+	OnRegisterProgress                     RegisterProgressFunc // see SessionConfig
+}
+
+// sideProgress adapts a RegisterProgressFunc to one pool's side, or
+// returns nil if there's nothing to report to.
+func sideProgress(f RegisterProgressFunc, side string) func(registered, failed, total int) {
+	if f == nil {
+		return nil
+	}
+	return func(registered, failed, total int) { f(side, registered, failed, total) }
 }
 
 // NewRemoteSession registers callerEndpoints against the caller server and
@@ -287,11 +320,11 @@ type RemoteSessionConfig struct {
 // Trunks/DIDs sections: dialing the DID's exact number just works once the
 // trunk+DID exist, no extra config needed).
 func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoints, calleeEndpoints []sipua.Endpoint, didForExt map[string]string) (*Session, error) {
-	callerPool, err := newPool(ctx, cfg.LocalIP, cfg.CallerBasePort, cfg.RegisterTimeout, cfg.CallerDialDestination, cfg.CallerSIPDomain, callerEndpoints)
+	callerPool, err := newPool(ctx, cfg.LocalIP, cfg.CallerBasePort, cfg.RegisterTimeout, cfg.CallerDialDestination, cfg.CallerSIPDomain, callerEndpoints, sideProgress(cfg.OnRegisterProgress, "caller"))
 	if err != nil {
 		return nil, fmt.Errorf("setting up caller pool: %w", err)
 	}
-	calleePool, err := newPool(ctx, cfg.LocalIP, cfg.CalleeBasePort, cfg.RegisterTimeout, cfg.CalleeDialDestination, cfg.CalleeSIPDomain, calleeEndpoints)
+	calleePool, err := newPool(ctx, cfg.LocalIP, cfg.CalleeBasePort, cfg.RegisterTimeout, cfg.CalleeDialDestination, cfg.CalleeSIPDomain, calleeEndpoints, sideProgress(cfg.OnRegisterProgress, "callee"))
 	if err != nil {
 		return nil, fmt.Errorf("setting up callee pool: %w", err)
 	}
@@ -492,6 +525,11 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	startedAt := time.Now()
 	s.logEvent("dialing", callerAOR, calleeAOR, "")
 	dialStart := time.Now()
+	// The callee answers with this call's codec if PBXware offers it (see
+	// sipua.Phone.SetPreferredCodec); the pool reserved it for this call only.
+	if callee := s.calleePool.phones[calleeAOR]; callee != nil {
+		callee.SetPreferredCodec(codec)
+	}
 	call, err := caller.Dial(s.ctx, s.dialTimeout, dialDestination, sipDomain, dialNumber, sendMedia, codec)
 	setupLatency := time.Since(dialStart) // INVITE-to-200-OK wall-clock time, win or lose — see CallRecord's doc comment
 	if err != nil {

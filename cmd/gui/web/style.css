@@ -522,3 +522,9 @@ button.btn.secondary.recording-on {
   padding: 6px 12px;
   font-size: 13px;
 }
+
+.wizard-notice {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.wizard-notice p { margin: 0.25em 0; }

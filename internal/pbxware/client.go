@@ -26,7 +26,7 @@ type Client struct {
 // anything public-facing.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
-		BaseURL: baseURL,
+		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		http: &http.Client{
 			Timeout: 30 * time.Second,

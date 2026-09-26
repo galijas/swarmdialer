@@ -139,6 +139,7 @@ async function provision(step) {
       }
       if (p.done) {
         statusEl.textContent = `Done — ${p.created} extensions created.`;
+        if (p.warning) addWizardNotice(p.warning);
         // Left disabled — this step is done and showStep moved us past it.
         if (step === 1) {
           wizardState.server1 = req;
@@ -156,6 +157,17 @@ async function provision(step) {
     statusEl.className = 'status-line error';
     btn.disabled = false;
   }
+}
+
+// addWizardNotice shows a non-fatal provisioning warning in a box at the
+// top of the wizard, which stays visible through the remaining steps
+// (showStep swaps panels, so a step's own status line would disappear).
+function addWizardNotice(text) {
+  const box = document.getElementById('wizard-notices');
+  const p = document.createElement('p');
+  p.textContent = '⚠ ' + text;
+  box.appendChild(p);
+  box.classList.remove('hidden');
 }
 
 function startSecondServer() {
@@ -306,6 +318,7 @@ function confirmDial(section, count) {
       count, call_duration_seconds: duration, use_rtp: useRTP, codec,
     }),
   }).then(r => {
+    if (r.trunk_note) logLine(r.trunk_note);
     logLine(`Requested +${count} ${section} calls (${codec}) — ${r.started} started (pool availability may limit this). A log will appear in ${section === 'local' ? 'Local' : 'Remote'} Call Logs once the batch finishes.`);
   }).catch(e => logLine('Error: ' + e.message, true));
 }
@@ -360,6 +373,23 @@ function applyRecordingState(section, st) {
   stereoCb.disabled = !st.enabled;
   formatSel.disabled = !st.enabled;
   if (st.format) formatSel.value = st.format;
+  applyCodecRecordingRestriction(section, st.enabled);
+}
+
+// PBXware has no G.729 transcoder (only passthrough), and recording has to
+// decode the audio, so G.729 calls are silently never recorded — confirmed
+// live 2026-09-25 ("No Translation Path" g729 -> slin in Asterisk). While
+// recording is on, G.729 is greyed out; if it was selected, the dialer
+// falls back to G.711 so the next batch actually gets recorded.
+function applyCodecRecordingRestriction(section, recordingOn) {
+  const codecSel = document.getElementById(section + '-codec');
+  const g729 = codecSel.querySelector('option[value="g729"]');
+  g729.disabled = recordingOn;
+  g729.textContent = recordingOn ? 'G.729 (not recordable)' : 'G.729';
+  if (recordingOn && codecSel.value === 'g729') {
+    codecSel.value = 'ulaw';
+    logLine(`${section === 'local' ? 'Local' : 'Remote'} dialer: switched codec from G.729 to G.711 (ulaw), since PBXware can't record G.729 calls.`);
+  }
 }
 
 async function refreshRecordingStatus(section) {
@@ -373,6 +403,7 @@ async function refreshRecordingStatus(section) {
     stereoCb.disabled = true;
     formatSel.disabled = true;
     statusEl.textContent = '';
+    applyCodecRecordingRestriction(section, false);
     return;
   }
   toggleBtn.disabled = false;
@@ -449,7 +480,9 @@ function connectStatusSockets() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const sock = new WebSocket(`${proto}://${location.host}/ws/status`);
   sock.onmessage = (ev) => {
-    const sessions = (JSON.parse(ev.data).sessions) || [];
+    const msg = JSON.parse(ev.data);
+    const sessions = msg.sessions || [];
+    renderRegistrations(msg.registrations || []);
     renderCombinedStats(sessions);
     renderEvents(sessions);
     renderGraph(sessions);
@@ -492,6 +525,41 @@ function renderEvents(sessions) {
       else if (ev.type === 'ended') logLine(`${tag}ended ${pair} (${ev.detail})`);
       else if (ev.type === 'batch_done') logLine(`${tag}<strong>${ev.detail}</strong>`);
     });
+  });
+}
+
+// Registration progress: a session's first dial registers every one of
+// its extensions before any call starts (~20s+ for 1000), which used to
+// happen with no sign of life in the dashboard. Each registration attempt
+// gets one log line, updated in place until it finishes.
+const registrationRows = new Map(); // registration id -> {row, done}
+
+function registrationText(r) {
+  const fmtSide = (sd) => `${sd.registered}/${sd.total}` + (sd.failed ? ` (${sd.failed} failed)` : '');
+  const sides = Object.entries(r.sides);
+  if (sides.length === 0) return '0 extensions so far';
+  if (sides.length === 1 && sides[0][0] === '') return fmtSide(sides[0][1]);
+  return sides.map(([side, sd]) => `${side} ${fmtSide(sd)}`).join(', ');
+}
+
+function renderRegistrations(regs) {
+  regs.forEach(r => {
+    let entry = registrationRows.get(r.id);
+    if (entry && entry.done) return;
+    const tag = `<span class="tag ${r.type}">${r.label}</span>`;
+    let html, isError = false;
+    if (r.message) html = `${tag}${r.done ? (r.done_message || r.message) : r.message}`;
+    else if (!r.done) html = `${tag}registering extensions: ${registrationText(r)}`;
+    else if (r.error) { html = `${tag}<span class="err">registration failed</span> (${registrationText(r)}): ${r.error}`; isError = true; }
+    else html = `${tag}<span class="ok">registered</span> ${registrationText(r)} extensions, starting calls`;
+    if (!entry) {
+      entry = {row: logLine(html, isError), done: false};
+      registrationRows.set(r.id, entry);
+    } else {
+      entry.row.innerHTML = `[${new Date().toLocaleTimeString()}] ${html}`;
+      entry.row.classList.toggle('error', isError);
+    }
+    entry.done = r.done;
   });
 }
 
@@ -546,6 +614,7 @@ function logLine(html, isError) {
   row.innerHTML = `[${time}] ${html}`;
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
+  return row;
 }
 
 // ---------- Dashboard: log browser ----------

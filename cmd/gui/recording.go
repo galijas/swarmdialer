@@ -7,30 +7,45 @@ import (
 	"swarmdialer/internal/pbxware"
 )
 
-// recordingTarget resolves which v2 client + tenant/system id a dialer
-// section's recording controls act on — same "always the caller/local
-// side" rule as batchReportTarget, since recording (like MOS/CDR) is a
-// property of whichever instance actually handles the call's leg, not the
-// callee's. edition is returned too since the stereo-recording field is
-// only ever system-level (see pbxware.SystemTenantID) — callers that also
-// touch stereo need to know whether tenantID here is a real Multi-Tenant
-// tenant (in which case stereo needs its own separate PATCH to
-// SystemTenantID) or already SystemTenantID itself.
-func (a *app) recordingTarget(section, serverID, peerServerID string) (client *pbxware.ClientV2, tenantID int, edition string, err error) {
-	srv := a.store.GetServer(serverID)
-	if srv == nil {
-		return nil, 0, "", errServerNotFound
-	}
+// recordingTarget is one PBXware instance a dialer section's recording
+// controls act on: its v2 client, the tenant/system id recording is set on
+// (a real tenant on Multi-Tenant, SystemTenantID otherwise), and its
+// edition — needed because stereo recording is only ever system-level (see
+// pbxware.SystemTenantID), so on Multi-Tenant it takes its own PATCH.
+type recordingTarget struct {
+	client   *pbxware.ClientV2
+	tenantID int
+	edition  string
+}
+
+// recordingTargets resolves every instance a dialer section's recording
+// controls act on. Local: just the server. Remote: both servers of the
+// pair — a remote call runs through both PBXware instances, and each one
+// records only if recording is on for it (confirmed live 2026-09-26: with
+// only the caller side toggled, the peer recorded nothing). The caller
+// side comes first.
+func (a *app) recordingTargets(section, serverID, peerServerID string) ([]recordingTarget, error) {
+	ids := []string{serverID}
 	if section == "remote" {
-		if a.store.GetServer(peerServerID) == nil {
-			return nil, 0, "", errServerNotFound
+		ids = append(ids, peerServerID)
+	}
+	targets := make([]recordingTarget, 0, len(ids))
+	for _, id := range ids {
+		srv := a.store.GetServer(id)
+		if srv == nil {
+			return nil, errServerNotFound
 		}
+		tenantID := srv.TenantID
+		if !pbxware.IsMultiTenantEdition(srv.Edition) {
+			tenantID = pbxware.SystemTenantID
+		}
+		targets = append(targets, recordingTarget{
+			client:   pbxware.NewClientV2(srv.BaseURL, srv.APIKeyV2),
+			tenantID: tenantID,
+			edition:  srv.Edition,
+		})
 	}
-	tenantID = srv.TenantID
-	if !pbxware.IsMultiTenantEdition(srv.Edition) {
-		tenantID = pbxware.SystemTenantID
-	}
-	return pbxware.NewClientV2(srv.BaseURL, srv.APIKeyV2), tenantID, srv.Edition, nil
+	return targets, nil
 }
 
 // recordingStatusResponse is the current recording state for one dialer
@@ -52,8 +67,9 @@ type recordingStatusResponse struct {
 // whose own record omits that field entirely (decodes to ""), so it needs
 // its own read from SystemTenantID, mirroring handleRecordingToggle's
 // write-side split.
-func readRecordingStatus(client *pbxware.ClientV2, tenantID int, edition string) (recordingStatusResponse, error) {
-	cfg, err := client.GetTenant(tenantID)
+func readRecordingStatus(t recordingTarget) (recordingStatusResponse, error) {
+	client, edition := t.client, t.edition
+	cfg, err := client.GetTenant(t.tenantID)
 	if err != nil {
 		return recordingStatusResponse{}, err
 	}
@@ -74,19 +90,40 @@ func readRecordingStatus(client *pbxware.ClientV2, tenantID int, edition string)
 	}, nil
 }
 
+// readCombinedRecordingStatus reads every target's state and reports
+// recording (and stereo) as on only if it's on for all of them, so a
+// half-enabled remote pair shows as off and one toggle turns both on. The
+// format shown is the caller side's.
+func readCombinedRecordingStatus(targets []recordingTarget) (recordingStatusResponse, error) {
+	var combined recordingStatusResponse
+	for i, t := range targets {
+		st, err := readRecordingStatus(t)
+		if err != nil {
+			return recordingStatusResponse{}, err
+		}
+		if i == 0 {
+			combined = st
+			continue
+		}
+		combined.Enabled = combined.Enabled && st.Enabled
+		combined.StereoEnabled = combined.StereoEnabled && st.StereoEnabled
+	}
+	return combined, nil
+}
+
 // handleRecordingStatus reads a dialer section's current recording state
 // (?section=local|remote&server_id=...&peer_server_id=...) — used to
 // initialize the recording row's controls when the server/pair selection
 // changes, so the toggle reflects PBXware's actual current setting rather
 // than always starting from an assumed "off".
 func (a *app) handleRecordingStatus(w http.ResponseWriter, r *http.Request) {
-	client, tenantID, edition, err := a.recordingTarget(
+	targets, err := a.recordingTargets(
 		r.URL.Query().Get("section"), r.URL.Query().Get("server_id"), r.URL.Query().Get("peer_server_id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
-	status, err := readRecordingStatus(client, tenantID, edition)
+	status, err := readCombinedRecordingStatus(targets)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -99,11 +136,11 @@ func (a *app) handleRecordingStatus(w http.ResponseWriter, r *http.Request) {
 // or read its state, it returns a zero-value "unknown" status rather than
 // failing the batch over a logging detail.
 func (a *app) currentRecordingStatus(section, serverID, peerServerID string) (recordingStatusResponse, bool) {
-	client, tenantID, edition, err := a.recordingTarget(section, serverID, peerServerID)
+	targets, err := a.recordingTargets(section, serverID, peerServerID)
 	if err != nil {
 		return recordingStatusResponse{}, false
 	}
-	status, err := readRecordingStatus(client, tenantID, edition)
+	status, err := readCombinedRecordingStatus(targets)
 	if err != nil {
 		return recordingStatusResponse{}, false
 	}
@@ -116,7 +153,7 @@ type recordingToggleRequest struct {
 	PeerServerID string `json:"peer_server_id"`
 	Enabled      bool   `json:"enabled"`
 	Stereo       bool   `json:"stereo"`
-	Format       string `json:"format"` // recording codec: gsm/wav/wav49/g729/ogg
+	Format       string `json:"format"` // recording codec: gsm/wav/wav49/ogg
 }
 
 func yesNo(b bool) string {
@@ -126,15 +163,8 @@ func yesNo(b bool) string {
 	return "no"
 }
 
-// handleRecordingToggle sets a dialer section's recording state via API
-// v2. enabled/format are PATCHed onto the target tenant (a real tenant ID
-// for Multi-Tenant, or SystemTenantID for non-Multi-Tenant — see
-// recordingTarget). stereo_recording_enabled is always system-level
-// regardless of edition (confirmed live 2026-09-24 — see
-// pbxware.SystemTenantID's doc comment), so on Multi-Tenant it needs its
-// own separate PATCH to SystemTenantID; on non-Multi-Tenant that's already
-// the same id as the first PATCH, so the second call is a harmless repeat
-// of the same target.
+// handleRecordingToggle sets a dialer section's recording state via API v2
+// on every target (see recordingTargets — both instances for remote).
 func (a *app) handleRecordingToggle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -149,45 +179,67 @@ func (a *app) handleRecordingToggle(w http.ResponseWriter, r *http.Request) {
 		req.Stereo = false // stereo never makes sense with recording itself off
 	}
 
-	client, tenantID, edition, err := a.recordingTarget(req.Section, req.ServerID, req.PeerServerID)
+	targets, err := a.recordingTargets(req.Section, req.ServerID, req.PeerServerID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
 
-	cfg, err := client.PatchTenant(tenantID, map[string]any{
+	statuses := make([]recordingStatusResponse, 0, len(targets))
+	for _, t := range targets {
+		st, err := applyRecordingSettings(t, req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		statuses = append(statuses, st)
+	}
+
+	// Report back what PBXware actually confirms is set on every target,
+	// combined the same way as readCombinedRecordingStatus.
+	combined := statuses[0]
+	for _, st := range statuses[1:] {
+		combined.Enabled = combined.Enabled && st.Enabled
+		combined.StereoEnabled = combined.StereoEnabled && st.StereoEnabled
+	}
+	writeJSON(w, http.StatusOK, combined)
+}
+
+// applyRecordingSettings PATCHes one target's recording settings and
+// returns what PBXware confirms is now set. enabled/format go on the
+// target's tenant (or system) record; stereo_recording_enabled always goes
+// on the system record (see pbxware.SystemTenantID) — on non-Multi-Tenant
+// that's the same record, so the second PATCH is a harmless repeat.
+func applyRecordingSettings(t recordingTarget, req recordingToggleRequest) (recordingStatusResponse, error) {
+	cfg, err := t.client.PatchTenant(t.tenantID, map[string]any{
 		"call_recordings": map[string]any{
 			"enabled": yesNo(req.Enabled),
 			"format":  req.Format,
 		},
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
+		return recordingStatusResponse{}, err
 	}
 
-	stereoTenantID := tenantID
-	if pbxware.IsMultiTenantEdition(edition) {
+	stereoTenantID := t.tenantID
+	if pbxware.IsMultiTenantEdition(t.edition) {
 		stereoTenantID = pbxware.SystemTenantID
 	}
-	stereoCfg, err := client.PatchTenant(stereoTenantID, map[string]any{
+	stereoCfg, err := t.client.PatchTenant(stereoTenantID, map[string]any{
 		"call_recordings": map[string]any{
 			"stereo_recording_enabled": yesNo(req.Stereo),
 		},
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
+		return recordingStatusResponse{}, err
 	}
 
-	// Report back what PBXware actually confirms is set, not just what was
-	// requested — the two PATCH responses above are the source of truth
-	// (see the RAM-disk dependency this uncovered live 2026-09-24: a stereo
-	// PATCH can silently no-op instead of erroring if the target isn't
-	// actually able to honor it yet).
-	writeJSON(w, http.StatusOK, recordingStatusResponse{
+	// The PATCH responses are the source of truth, not the request: a
+	// stereo PATCH can silently no-op instead of erroring if the target
+	// can't honor it yet (the RAM-disk dependency found live 2026-09-24).
+	return recordingStatusResponse{
 		Enabled:       cfg.CallRecordings.Enabled == "yes",
 		StereoEnabled: stereoCfg.CallRecordings.StereoRecordingEnabled == "yes",
 		Format:        cfg.CallRecordings.Format,
-	})
+	}, nil
 }

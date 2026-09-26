@@ -25,6 +25,9 @@
 <!-- ============ SETUP WIZARD ============ -->
 <section id="tab-wizard">
 
+  <!-- Non-fatal warnings from provisioning (e.g. PBXware restart needed) — stays visible across steps -->
+  <div class="panel wizard-notice hidden" id="wizard-notices"></div>
+
   <!-- Step 1: connect server 1 -->
   <div class="panel" id="step-connect-1">
     <h2>Step 1: Connect PBXware</h2>
@@ -134,7 +137,6 @@
         <option value="wav49" selected>wav49</option>
         <option value="wav">wav</option>
         <option value="gsm">gsm</option>
-        <option value="g729">g729</option>
         <option value="ogg">ogg</option>
       </select>
       <span class="status-line" id="local-recording-status"></span>
@@ -180,7 +182,6 @@
         <option value="wav49" selected>wav49</option>
         <option value="wav">wav</option>
         <option value="gsm">gsm</option>
-        <option value="g729">g729</option>
         <option value="ogg">ogg</option>
       </select>
       <span class="status-line" id="remote-recording-status"></span>

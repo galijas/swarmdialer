@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // TrunkProvider is one entry from pbxware.trunk.providers.
@@ -80,8 +81,13 @@ type TrunkResult struct {
 }
 
 // AddTrunk creates a SIP trunk. Codec/DTMF/etc. are fixed to sensible
-// defaults for load testing (G.711, RFC2833 DTMF) — SwarmDialer doesn't
-// need this to be configurable beyond what TrunkParams exposes.
+// defaults for load testing (SwarmDialerCodecsList, RFC2833 DTMF) —
+// SwarmDialer doesn't need this to be configurable beyond what TrunkParams
+// exposes. The trunk must allow every codec the dialer can place calls
+// with: with only ulaw/alaw allowed (the original setting), remote G.729
+// calls failed outright with 503 (PBXware can't transcode G.729) and
+// remote G.722/Opus calls were silently transcoded to ulaw on the trunk —
+// confirmed live 2026-09-26.
 //
 // type=peer + passthru_mode=yes + peer_username="admin" (a fixed literal,
 // not a per-deployment generated value) + from_ipaddr=PeerHost +
@@ -119,8 +125,8 @@ func (c *Client) AddTrunk(p TrunkParams) (TrunkResult, error) {
 		"looserouting":  {"yes"},
 		"incominglimit": {"1000"},
 		"outgoinglimit": {"1000"},
-		"codecs":        {"ulaw,alaw"},
-		"codecs_ptime":  {"20,20"}, // one ptime per codec — must match codecs' item count
+		"codecs":        {strings.Join(SwarmDialerCodecsList, ",")},
+		"codecs_ptime":  {trunkCodecPtimes()}, // one ptime per codec — must match codecs' item count
 	}
 	body, err := c.call("pbxware.trunk.add", params)
 	if err != nil {
@@ -131,6 +137,16 @@ func (c *Client) AddTrunk(p TrunkParams) (TrunkResult, error) {
 		return TrunkResult{}, fmt.Errorf("trunk.add succeeded but response had no usable id: %w", err)
 	}
 	return TrunkResult{TrunkID: id}, nil
+}
+
+// trunkCodecPtimes returns "20,20,..." with one 20ms ptime per entry in
+// SwarmDialerCodecsList, as trunk.add requires.
+func trunkCodecPtimes() string {
+	ptimes := make([]string, len(SwarmDialerCodecsList))
+	for i := range ptimes {
+		ptimes[i] = "20"
+	}
+	return strings.Join(ptimes, ",")
 }
 
 // SetTenantDefaultTrunk sets trunkID as tenantID's primary (and only, for

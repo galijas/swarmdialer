@@ -50,6 +50,9 @@ type RTPSession struct {
 	codec Codec
 	spec  codecSpec
 	enc   frameEncoder
+	// payloadType is the RTP payload type number we send with — the
+	// codec's default until SetPayloadType applies the peer's number.
+	payloadType uint8
 
 	ssrc        uint32
 	seq         uint16
@@ -137,6 +140,7 @@ func NewRTPSession(localPort int, codec Codec) (*RTPSession, error) {
 		codec:        codec,
 		spec:         spec,
 		enc:          spec.newEncoder(),
+		payloadType:  spec.payloadType,
 		ssrc:         rand.Uint32(),
 		seq:          uint16(rand.Uint32()),
 		timestamp:    rand.Uint32(),
@@ -144,6 +148,11 @@ func NewRTPSession(localPort int, codec Codec) (*RTPSession, error) {
 		stop:         make(chan struct{}),
 	}, nil
 }
+
+// SetPayloadType sets the RTP payload type number outgoing packets carry —
+// the number the peer's SDP declared for this codec (see buildSDP). Must be
+// called before Start.
+func (s *RTPSession) SetPayloadType(pt uint8) { s.payloadType = pt }
 
 // LocalPort is the UDP port this session's RTP is bound to — put this in
 // the SDP media line we offer/answer with (RTCP is always this + 1).
@@ -212,7 +221,7 @@ func (s *RTPSession) sendLoop(ctx context.Context) {
 			pkt := rtp.Packet{
 				Header: rtp.Header{
 					Version:        2,
-					PayloadType:    s.spec.payloadType,
+					PayloadType:    s.payloadType,
 					SequenceNumber: s.seq,
 					Timestamp:      s.timestamp,
 					SSRC:           s.ssrc,

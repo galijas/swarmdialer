@@ -52,6 +52,7 @@ func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	req.BaseURL = normalizeBaseURL(req.BaseURL)
 	result, err := wizard.TestConnection(req.BaseURL, req.APIKey, req.APIKeyV2)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -104,7 +105,7 @@ func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		srv, err := wizard.Provision(a.ctx, wizard.ProvisionParams{
-			Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey, APIKeyV2: req.APIKeyV2,
+			Name: req.Name, BaseURL: normalizeBaseURL(req.BaseURL), APIKey: req.APIKey, APIKeyV2: req.APIKeyV2,
 			ExtensionCount: req.ExtensionCount,
 			TenantCode:     req.TenantCode, TenantName: req.TenantName,
 			ExtLength: req.ExtLength,
@@ -265,10 +266,36 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 	// set to for these calls), not something that should reflect a toggle
 	// flip made later while the batch was still running.
 	recording, recordingKnown := a.currentRecordingStatus(req.Section, req.ServerID, req.PeerServerID)
+
+	// Remote calls cross the trunk between the two instances, whose codec
+	// order has to match this batch's codec — see prepareRemoteBatch.
+	trunkNote, release := "", func() {}
+	if req.Section == "remote" {
+		srv, peer := a.store.GetServer(req.ServerID), a.store.GetServer(req.PeerServerID)
+		if srv == nil || peer == nil {
+			writeError(w, http.StatusBadRequest, errServerNotFound)
+			return
+		}
+		note, rel, err := a.prepareRemoteBatch(srv, peer, string(codec))
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, errTrunkCodecBusy) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err)
+			return
+		}
+		trunkNote, release = note, rel
+	}
+
 	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP, codec, func(records []orchestrator.CallRecord) {
+		release() // every call has ended; the trunk is free for another codec
 		a.reportBatch(logSection, reportLabel, reportClient, reportServerID, sess, req.Count, records, recording, recordingKnown)
 	})
-	writeJSON(w, http.StatusOK, map[string]int{"started": started})
+	if started == 0 {
+		release() // no batch started, so onBatchDone never runs
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"started": started, "trunk_note": trunkNote})
 }
 
 // sessionFor returns the session for dialing from serverID — for "local"
@@ -278,64 +305,109 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 // pair), so multiple servers/pairs can each have their own live session
 // at once rather than sharing one implicit "the local server" slot.
 func (a *app) sessionFor(section, serverID, peerServerID string) (*orchestrator.Session, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if serverID == "" {
-		return nil, errNoServerChosen
-	}
-	srv := a.store.GetServer(serverID)
-	if srv == nil {
-		return nil, errServerNotFound
-	}
-
-	if section == "remote" {
-		if peerServerID == "" {
-			return nil, errNoPeerChosen
+	for {
+		a.mu.Lock()
+		if serverID == "" {
+			a.mu.Unlock()
+			return nil, errNoServerChosen
 		}
-		peer := a.store.GetServer(peerServerID)
-		if peer == nil {
+		srv := a.store.GetServer(serverID)
+		if srv == nil {
+			a.mu.Unlock()
 			return nil, errServerNotFound
 		}
-		if srv.PeerServerID != peer.ID {
-			return nil, errNotConnected
+
+		var (
+			key, label string
+			create     func(orchestrator.RegisterProgressFunc) (*orchestrator.Session, error)
+			save       func(*orchestrator.Session)
+		)
+		if section == "remote" {
+			if peerServerID == "" {
+				a.mu.Unlock()
+				return nil, errNoPeerChosen
+			}
+			peer := a.store.GetServer(peerServerID)
+			if peer == nil {
+				a.mu.Unlock()
+				return nil, errServerNotFound
+			}
+			if srv.PeerServerID != peer.ID {
+				a.mu.Unlock()
+				return nil, errNotConnected
+			}
+			pairKey := serverID + "|" + peerServerID
+			if sess, ok := a.remoteSessions[pairKey]; ok {
+				a.mu.Unlock()
+				return sess, nil
+			}
+			key, label = "remote:"+pairKey, srv.Name+" → "+peer.Name
+			cfg := orchestrator.RemoteSessionConfig{
+				CallerDialDestination: srv.SIPHost, CallerSIPDomain: srv.SIPHost,
+				CalleeDialDestination: peer.SIPHost, CalleeSIPDomain: peer.SIPHost,
+				LocalIP:         srv.LocalIP,
+				CallerBasePort:  a.allocPortRangeLocked(len(srv.Extensions)),
+				CalleeBasePort:  a.allocPortRangeLocked(len(peer.Extensions)),
+				RegisterTimeout: 15 * time.Second,
+				DialTimeout:     15 * time.Second,
+			}
+			callers, callees, dids := toEndpoints(srv.Extensions), toEndpoints(peer.Extensions), didLookup(peer)
+			create = func(progress orchestrator.RegisterProgressFunc) (*orchestrator.Session, error) {
+				cfg.OnRegisterProgress = progress
+				return orchestrator.NewRemoteSession(a.ctx, cfg, callers, callees, dids)
+			}
+			save = func(sess *orchestrator.Session) { a.remoteSessions[pairKey] = sess }
+		} else {
+			if sess, ok := a.localSessions[serverID]; ok {
+				a.mu.Unlock()
+				return sess, nil
+			}
+			key, label = "local:"+serverID, srv.Name
+			cfg := orchestrator.SessionConfig{
+				DialDestination: srv.SIPHost, SIPDomain: srv.SIPHost,
+				LocalIP:         srv.LocalIP,
+				BaseLocalPort:   a.allocPortRangeLocked(len(srv.Extensions)),
+				RegisterTimeout: 15 * time.Second,
+				DialTimeout:     15 * time.Second,
+			}
+			endpoints := toEndpoints(srv.Extensions)
+			create = func(progress orchestrator.RegisterProgressFunc) (*orchestrator.Session, error) {
+				cfg.OnRegisterProgress = progress
+				return orchestrator.NewSession(a.ctx, cfg, endpoints)
+			}
+			save = func(sess *orchestrator.Session) { a.localSessions[serverID] = sess }
 		}
 
-		key := serverID + "|" + peerServerID
-		if sess, ok := a.remoteSessions[key]; ok {
-			return sess, nil
+		// Another dial for the same session is already registering its
+		// extensions: wait for that instead of registering them twice,
+		// then look again (it may have failed, in which case this one
+		// tries itself).
+		if ch, ok := a.pendingSessions[key]; ok {
+			a.mu.Unlock()
+			<-ch
+			continue
 		}
-		sess, err := orchestrator.NewRemoteSession(a.ctx, orchestrator.RemoteSessionConfig{
-			CallerDialDestination: srv.SIPHost, CallerSIPDomain: srv.SIPHost,
-			CalleeDialDestination: peer.SIPHost, CalleeSIPDomain: peer.SIPHost,
-			LocalIP:         srv.LocalIP,
-			CallerBasePort:  a.allocPortRangeLocked(len(srv.Extensions)),
-			CalleeBasePort:  a.allocPortRangeLocked(len(peer.Extensions)),
-			RegisterTimeout: 15 * time.Second,
-			DialTimeout:     15 * time.Second,
-		}, toEndpoints(srv.Extensions), toEndpoints(peer.Extensions), didLookup(peer))
-		if err != nil {
-			return nil, err
-		}
-		a.remoteSessions[key] = sess
-		return sess, nil
-	}
+		done := make(chan struct{})
+		a.pendingSessions[key] = done
+		a.mu.Unlock()
 
-	if sess, ok := a.localSessions[serverID]; ok {
-		return sess, nil
+		// Registering every extension takes a while (20ms stagger per
+		// extension plus PBXware's replies — ~20s+ for 1000), so it runs
+		// without holding a.mu: holding it here froze the live status feed
+		// (allSnapshots needs a.mu) for the whole registration.
+		reg := a.startRegistration(key, section, label)
+		sess, err := create(reg.update)
+		reg.finish(err)
+
+		a.mu.Lock()
+		delete(a.pendingSessions, key)
+		if err == nil {
+			save(sess)
+		}
+		a.mu.Unlock()
+		close(done)
+		return sess, err
 	}
-	sess, err := orchestrator.NewSession(a.ctx, orchestrator.SessionConfig{
-		DialDestination: srv.SIPHost, SIPDomain: srv.SIPHost,
-		LocalIP:         srv.LocalIP,
-		BaseLocalPort:   a.allocPortRangeLocked(len(srv.Extensions)),
-		RegisterTimeout: 15 * time.Second,
-		DialTimeout:     15 * time.Second,
-	}, toEndpoints(srv.Extensions))
-	if err != nil {
-		return nil, err
-	}
-	a.localSessions[serverID] = sess
-	return sess, nil
 }
 
 // batchReportTarget resolves what reportBatch needs to log/query MOS for
@@ -434,7 +506,7 @@ func didLookup(srv *store.Server) map[string]string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": a.allSnapshots()})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": a.allSnapshots(), "registrations": a.registrationSnapshots()})
 }
 
 // --- Settings: reset ---
@@ -546,4 +618,11 @@ func (a *app) handleResetSwarmDialer(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		restartProcess()
 	}()
+}
+
+// normalizeBaseURL trims whitespace and trailing slashes from a PBXware
+// base URL as typed in the wizard ("https://10.1.101.11/" is common), so
+// the stored form is consistent and path joins don't produce "//api/...".
+func normalizeBaseURL(u string) string {
+	return strings.TrimRight(strings.TrimSpace(u), "/")
 }

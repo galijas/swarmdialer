@@ -43,8 +43,22 @@ type app struct {
 	resetJobs      map[string]*wizard.ResetProgress
 	localSessions  map[string]*orchestrator.Session // server ID -> session
 	remoteSessions map[string]*orchestrator.Session // "callerID|calleeID" -> session
-	nextJobID      uint64
-	nextPortOffset int // grows so successive sessions don't reuse ports
+	// pendingSessions holds a channel per session key ("local:<id>" /
+	// "remote:<caller>|<callee>") whose session is still registering its
+	// extensions; it's closed once that finishes (see sessionFor).
+	pendingSessions map[string]chan struct{}
+	nextJobID       uint64
+	nextPortOffset  int // grows so successive sessions don't reuse ports
+
+	// regMu guards registrations separately from mu, so progress updates
+	// from registering phones never wait on anything else.
+	regMu         sync.Mutex
+	registrations map[string]*registrationStatus // see registration.go
+	nextRegID     uint64
+
+	// trunkMu guards remoteBatches (see prepareRemoteBatch).
+	trunkMu       sync.Mutex
+	remoteBatches map[string]*remoteBatchState // "callerID|calleeID" -> state
 }
 
 func newApp(ctx context.Context, configPath string) (*app, error) {
@@ -57,15 +71,18 @@ func newApp(ctx context.Context, configPath string) (*app, error) {
 		return nil, fmt.Errorf("opening log store: %w", err)
 	}
 	return &app{
-		ctx:            ctx,
-		store:          st,
-		logs:           logs,
-		configPath:     configPath,
-		provisionJobs:  make(map[string]*wizard.ProvisionProgress),
-		connectJobs:    make(map[string]*wizard.ConnectProgress),
-		resetJobs:      make(map[string]*wizard.ResetProgress),
-		localSessions:  make(map[string]*orchestrator.Session),
-		remoteSessions: make(map[string]*orchestrator.Session),
+		ctx:             ctx,
+		store:           st,
+		logs:            logs,
+		configPath:      configPath,
+		provisionJobs:   make(map[string]*wizard.ProvisionProgress),
+		connectJobs:     make(map[string]*wizard.ConnectProgress),
+		resetJobs:       make(map[string]*wizard.ResetProgress),
+		localSessions:   make(map[string]*orchestrator.Session),
+		remoteSessions:  make(map[string]*orchestrator.Session),
+		pendingSessions: make(map[string]chan struct{}),
+		registrations:   make(map[string]*registrationStatus),
+		remoteBatches:   make(map[string]*remoteBatchState),
 	}, nil
 }
 
@@ -138,7 +155,7 @@ func restartProcess() {
 
 func (a *app) sessionWSHandler() http.Handler {
 	return statusapi.WSHandler(func() any {
-		return map[string]any{"sessions": a.allSnapshots()}
+		return map[string]any{"sessions": a.allSnapshots(), "registrations": a.registrationSnapshots()}
 	}, time.Second)
 }
 
