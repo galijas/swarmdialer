@@ -22,7 +22,17 @@ type SessionConfig struct {
 	BaseLocalPort   int
 	RegisterTimeout time.Duration
 	DialTimeout     time.Duration
+	// OnRegisterProgress, if non-nil, is called as each extension finishes
+	// its initial registration (see RegisterProgressFunc).
+	OnRegisterProgress RegisterProgressFunc
 }
+
+// RegisterProgressFunc reports a pool's initial registration progress:
+// how many of total extensions have registered and how many failed so far.
+// side is "" for a local session's single pool, or "caller"/"callee" for a
+// remote session's two. Called from many goroutines at once; it must be
+// safe for concurrent use and cheap.
+type RegisterProgressFunc func(side string, registered, failed, total int)
 
 // pool is one registered, auto-answering set of extensions on one PBXware
 // server. A local Session has one pool shared as both caller and callee;
@@ -34,7 +44,7 @@ type pool struct {
 	sipDomain       string
 }
 
-func newPool(ctx context.Context, localIP string, basePort int, registerTimeout time.Duration, dialDestination, sipDomain string, endpoints []sipua.Endpoint) (*pool, error) {
+func newPool(ctx context.Context, localIP string, basePort int, registerTimeout time.Duration, dialDestination, sipDomain string, endpoints []sipua.Endpoint, progress func(registered, failed, total int)) (*pool, error) {
 	if sipDomain == "" {
 		sipDomain = dialDestination
 	}
@@ -50,7 +60,7 @@ func newPool(ctx context.Context, localIP string, basePort int, registerTimeout 
 		order = append(order, ep.AOR)
 	}
 
-	if err := registerPhonesStaggered(ctx, registerTimeout, dialDestination, sipDomain, phones, order); err != nil {
+	if err := registerPhonesStaggered(ctx, registerTimeout, dialDestination, sipDomain, phones, order, progress); err != nil {
 		return nil, err
 	}
 	log.Printf("session: %d extensions registered against %s", len(phones), dialDestination)
@@ -82,8 +92,17 @@ func newPool(ctx context.Context, localIP string, basePort int, registerTimeout 
 // between each (see orchestrator.go's registerAll for why — PBXware
 // rejects a chunk of otherwise-valid REGISTERs when hit fully
 // concurrently).
-func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDestination, sipDomain string, phones map[string]*sipua.Phone, order []string) error {
+func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDestination, sipDomain string, phones map[string]*sipua.Phone, order []string, progress func(registered, failed, total int)) error {
 	const registerStagger = 20 * time.Millisecond
+
+	var registered, failedCount atomic.Int64
+	total := len(order)
+	report := func() {
+		if progress != nil {
+			progress(int(registered.Load()), int(failedCount.Load()), total)
+		}
+	}
+	report() // 0/total, so the caller can show registration has started
 
 	var wg sync.WaitGroup
 	errs := make([]error, len(order))
@@ -101,7 +120,11 @@ func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDes
 			defer cancel()
 			if _, err := phone.Register(regCtx, dialDestination, sipDomain, 300); err != nil {
 				errs[i] = fmt.Errorf("registering %s: %w", phone.Endpoint.AOR, err)
+				failedCount.Add(1)
+			} else {
+				registered.Add(1)
 			}
+			report()
 		}(i, phones[aor])
 	}
 	wg.Wait()
@@ -145,6 +168,27 @@ type activeCall struct {
 	callerAOR, calleeAOR string
 	call                 *sipua.Call
 	startedAt            time.Time
+	codec                sipua.Codec
+	setupLatency         time.Duration // INVITE-to-200-OK wall-clock time (Phone.Dial's own duration)
+}
+
+// CallRecord is one completed call's full detail — captured at the moment
+// it ends, before its activeCall entry is discarded. This is what feeds
+// both per-batch MOS/latency aggregation and the per-batch log file (see
+// cmd/gui/handlers.go and the (future) logging package) — kept separate
+// from the live-status Event type since a log line needs much more detail
+// than the dashboard's log view does.
+type CallRecord struct {
+	CallerAOR    string
+	CalleeAOR    string
+	Codec        sipua.Codec
+	StartedAt    time.Time
+	EndedAt      time.Time
+	Answered     bool
+	FailReason   string
+	SetupLatency time.Duration
+	RTPSent      uint64
+	RTPRecv      uint64
 }
 
 // Event is one point-in-time occurrence in a call's lifecycle (dialing,
@@ -233,7 +277,7 @@ type Session struct {
 // PBXware server, sets each to auto-answer, and returns a Session ready
 // for AddCalls, dialing between each other directly by extension number.
 func NewSession(ctx context.Context, cfg SessionConfig, endpoints []sipua.Endpoint) (*Session, error) {
-	p, err := newPool(ctx, cfg.LocalIP, cfg.BaseLocalPort, cfg.RegisterTimeout, cfg.DialDestination, cfg.SIPDomain, endpoints)
+	p, err := newPool(ctx, cfg.LocalIP, cfg.BaseLocalPort, cfg.RegisterTimeout, cfg.DialDestination, cfg.SIPDomain, endpoints, sideProgress(cfg.OnRegisterProgress, ""))
 	if err != nil {
 		return nil, err
 	}
@@ -251,11 +295,21 @@ func NewSession(ctx context.Context, cfg SessionConfig, endpoints []sipua.Endpoi
 type RemoteSessionConfig struct {
 	CallerDialDestination, CallerSIPDomain string
 	CalleeDialDestination, CalleeSIPDomain string
-	LocalIP         string
-	CallerBasePort  int
-	CalleeBasePort  int
-	RegisterTimeout time.Duration
-	DialTimeout     time.Duration
+	LocalIP                                string
+	CallerBasePort                         int
+	CalleeBasePort                         int
+	RegisterTimeout                        time.Duration
+	DialTimeout                            time.Duration
+	OnRegisterProgress                     RegisterProgressFunc // see SessionConfig
+}
+
+// sideProgress adapts a RegisterProgressFunc to one pool's side, or
+// returns nil if there's nothing to report to.
+func sideProgress(f RegisterProgressFunc, side string) func(registered, failed, total int) {
+	if f == nil {
+		return nil
+	}
+	return func(registered, failed, total int) { f(side, registered, failed, total) }
 }
 
 // NewRemoteSession registers callerEndpoints against the caller server and
@@ -266,11 +320,11 @@ type RemoteSessionConfig struct {
 // Trunks/DIDs sections: dialing the DID's exact number just works once the
 // trunk+DID exist, no extra config needed).
 func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoints, calleeEndpoints []sipua.Endpoint, didForExt map[string]string) (*Session, error) {
-	callerPool, err := newPool(ctx, cfg.LocalIP, cfg.CallerBasePort, cfg.RegisterTimeout, cfg.CallerDialDestination, cfg.CallerSIPDomain, callerEndpoints)
+	callerPool, err := newPool(ctx, cfg.LocalIP, cfg.CallerBasePort, cfg.RegisterTimeout, cfg.CallerDialDestination, cfg.CallerSIPDomain, callerEndpoints, sideProgress(cfg.OnRegisterProgress, "caller"))
 	if err != nil {
 		return nil, fmt.Errorf("setting up caller pool: %w", err)
 	}
-	calleePool, err := newPool(ctx, cfg.LocalIP, cfg.CalleeBasePort, cfg.RegisterTimeout, cfg.CalleeDialDestination, cfg.CalleeSIPDomain, calleeEndpoints)
+	calleePool, err := newPool(ctx, cfg.LocalIP, cfg.CalleeBasePort, cfg.RegisterTimeout, cfg.CalleeDialDestination, cfg.CalleeSIPDomain, calleeEndpoints, sideProgress(cfg.OnRegisterProgress, "callee"))
 	if err != nil {
 		return nil, fmt.Errorf("setting up callee pool: %w", err)
 	}
@@ -298,7 +352,16 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 // should just report). Each call automatically hangs up and returns its
 // extensions to the pool after callDuration, or immediately if Stop is
 // called first.
-func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, sendMedia bool) (started int) {
+//
+// onBatchDone, if non-nil, is called once every call in this batch has
+// ended, with one CallRecord per call that actually got as far as
+// dialing (a call canceled during its ramp-delay wait — before Dial was
+// ever invoked — has nothing to record and is left out). This package
+// has no knowledge of PBXware's CDR/MOS API or of log files — it's the
+// caller's job (see cmd/gui/handlers.go) to turn these records into
+// per-batch MOS/latency aggregates and a log file, then report a summary
+// back via LogBatchQuality.
+func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, sendMedia bool, codec sipua.Codec, onBatchDone func([]CallRecord)) (started int) {
 	pairs := s.reservePairs(n)
 	if len(pairs) == 0 {
 		return 0
@@ -310,6 +373,8 @@ func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, send
 
 	var wg sync.WaitGroup
 	var batchAnswered, batchFailed atomic.Uint64
+	var recordsMu sync.Mutex
+	records := make([]CallRecord, 0, len(pairs))
 	wg.Add(len(pairs))
 	for i, pair := range pairs {
 		s.totalCallsStarted.Add(1)
@@ -328,7 +393,11 @@ func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, send
 				batchFailed.Add(1)
 				return
 			}
-			if s.runCall(caller, callee, callDuration, sendMedia, stopCh) {
+			rec := s.runCall(caller, callee, callDuration, sendMedia, stopCh, codec)
+			recordsMu.Lock()
+			records = append(records, rec)
+			recordsMu.Unlock()
+			if rec.Answered {
 				batchAnswered.Add(1)
 			} else {
 				batchFailed.Add(1)
@@ -342,9 +411,21 @@ func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, send
 			"+%d batch: %d/%d calls answered, %d failed",
 			n, batchAnswered.Load(), len(pairs), batchFailed.Load(),
 		))
+		if onBatchDone != nil {
+			onBatchDone(records)
+		}
 	}()
 
 	return len(pairs)
+}
+
+// LogBatchQuality posts a follow-up event to the session's log/event
+// stream — used by the caller (which owns the pbxware.Client needed for
+// MOS lookups, not available to this package) to report per-batch
+// MOS/latency aggregates shortly after AddCalls' own immediate
+// "batch_done" summary, once it's finished computing them.
+func (s *Session) LogBatchQuality(detail string) {
+	s.logEvent("batch_quality", "", "", detail)
 }
 
 // reservePairs atomically picks up to n pairs of available extensions
@@ -427,10 +508,11 @@ func (s *Session) release(caller, callee string) {
 	s.calleePool.available[callee] = true
 }
 
-// runCall places one call and blocks until it ends (naturally, via ctx
-// cancellation, or via stopCh being closed by Stop), returning whether it
-// was answered (for the caller's batch-completion tally — see AddCalls).
-func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool, stopCh <-chan struct{}) bool {
+// runCall places one call using codec and blocks until it ends (naturally,
+// via ctx cancellation, or via stopCh being closed by Stop), returning a
+// full record of what happened (for the caller's batch-completion tally
+// and MOS/latency/log reporting — see AddCalls).
+func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool, stopCh <-chan struct{}, codec sipua.Codec) CallRecord {
 	s.mu.Lock()
 	caller := s.callerPool.phones[callerAOR]
 	dialDestination, sipDomain := s.callerPool.dialDestination, s.callerPool.sipDomain
@@ -440,20 +522,32 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	}
 	s.mu.Unlock()
 
+	startedAt := time.Now()
 	s.logEvent("dialing", callerAOR, calleeAOR, "")
-	call, err := caller.Dial(s.ctx, s.dialTimeout, dialDestination, sipDomain, dialNumber, sendMedia)
+	dialStart := time.Now()
+	// The callee answers with this call's codec if PBXware offers it (see
+	// sipua.Phone.SetPreferredCodec); the pool reserved it for this call only.
+	if callee := s.calleePool.phones[calleeAOR]; callee != nil {
+		callee.SetPreferredCodec(codec)
+	}
+	call, err := caller.Dial(s.ctx, s.dialTimeout, dialDestination, sipDomain, dialNumber, sendMedia, codec)
+	setupLatency := time.Since(dialStart) // INVITE-to-200-OK wall-clock time, win or lose — see CallRecord's doc comment
 	if err != nil {
 		log.Printf("session: %s -> %s (dialing %s): dial failed: %v", callerAOR, calleeAOR, dialNumber, err)
 		s.logEvent("failed", callerAOR, calleeAOR, err.Error())
 		s.totalCallsFailed.Add(1)
 		s.release(callerAOR, calleeAOR)
-		return false
+		return CallRecord{
+			CallerAOR: callerAOR, CalleeAOR: calleeAOR, Codec: codec,
+			StartedAt: startedAt, EndedAt: time.Now(),
+			Answered: false, FailReason: err.Error(), SetupLatency: setupLatency,
+		}
 	}
 	s.totalCallsAnswered.Add(1)
 	s.logEvent("answered", callerAOR, calleeAOR, "")
 
 	id := fmt.Sprintf("%d", s.nextCallID.Add(1))
-	ac := &activeCall{id: id, callerAOR: callerAOR, calleeAOR: calleeAOR, call: call, startedAt: time.Now()}
+	ac := &activeCall{id: id, callerAOR: callerAOR, calleeAOR: calleeAOR, call: call, startedAt: startedAt, codec: codec, setupLatency: setupLatency}
 	s.mu.Lock()
 	s.calls[id] = ac
 	s.mu.Unlock()
@@ -480,7 +574,11 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	delete(s.calls, id)
 	s.mu.Unlock()
 	s.release(callerAOR, calleeAOR)
-	return true
+	return CallRecord{
+		CallerAOR: callerAOR, CalleeAOR: calleeAOR, Codec: codec,
+		StartedAt: startedAt, EndedAt: time.Now(),
+		Answered: true, SetupLatency: setupLatency, RTPSent: sent, RTPRecv: recv,
+	}
 }
 
 // Snapshot returns a point-in-time, serializable view of the session.

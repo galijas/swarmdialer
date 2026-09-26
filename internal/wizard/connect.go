@@ -72,7 +72,7 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	if err != nil {
 		return fmt.Errorf("generating credentials: %w", err)
 	}
-	userA, userB := "swarm"+a.ID, "swarm"+b.ID
+	userA, userB := trunkUsername(a.ID), trunkUsername(b.ID)
 
 	// Peer trunk credentials use a fixed peer_username ("admin") rather
 	// than a cross-referenced generated one — see AddTrunk.
@@ -144,16 +144,13 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 		return err
 	}
 
-	// Trunks (like tenants and extensions) need a settling period after
-	// creation before they're actually usable for routing — confirmed
-	// live: dialing a freshly-created DID through a freshly-created trunk
-	// failed with "No such extension/context ... while calling Local
-	// channel" immediately after creation, then succeeded once ~90s had
-	// passed with no other change. There's no read-back call that
-	// confirms "this trunk is ready" the way tenant.configuration does for
-	// channel limits, so this is a blind wait rather than retry+verify —
-	// tuned empirically, may need adjustment on a different/faster
-	// PBXware instance.
+	// A new trunk isn't usable for routing straight away — dialing a
+	// fresh DID through a fresh trunk failed with "No such extension/
+	// context ... while calling Local channel", then worked ~90s later with
+	// no other change. The cause (found 2026-09-26): PBXware writes PJSIP
+	// config immediately but Asterisk only reloads it on PBXware's own
+	// 1-minute cycle, and no API call can trigger or confirm that reload.
+	// 90s covers one full cycle with margin.
 	progress.set(func() { progress.stage = "settling" })
 	time.Sleep(90 * time.Second)
 
@@ -215,4 +212,17 @@ func hostOnly(sipHost string) string {
 		}
 	}
 	return sipHost
+}
+
+// trunkUsername derives a trunk auth username from a server ID. PBXware 8.2
+// rejects trunk usernames over 20 characters, and "swarm"+ID ("srv-" plus a
+// 19-digit nanosecond timestamp) is 28, so only the ID's last 10 digits are
+// kept — still distinct between the two servers of a pair, which are
+// created seconds apart.
+func trunkUsername(serverID string) string {
+	id := strings.TrimPrefix(serverID, "srv-")
+	if len(id) > 10 {
+		id = id[len(id)-10:]
+	}
+	return "swarm" + id
 }

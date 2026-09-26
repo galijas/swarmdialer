@@ -19,6 +19,9 @@ function showTab(name) {
   if (name === 'dashboard') {
     refreshServerList();
     connectStatusSockets();
+    refreshLogList('local');
+    refreshLogList('remote');
+    startLogListPolling();
   }
   if (name === 'settings') {
     refreshSettingsTab();
@@ -62,11 +65,12 @@ async function testConnection(step) {
     const req = {
       base_url: document.getElementById(prefix + '-url').value.trim(),
       api_key: document.getElementById(prefix + '-key').value.trim(),
+      api_key_v2: document.getElementById(prefix + '-key-v2').value.trim(),
     };
     const result = await api('/api/wizard/test-connection', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req),
     });
-    statusEl.textContent = `Connected. Edition: ${result.edition}. License limits — Extensions: ${result.extensions}, Tenants: ${result.tenants}, DIDs: ${result.dids}, VOIP Trunks: ${result.voip_trunks}, Channels: ${result.channels}. Note: PBXware's system-wide Local/Remote channel limits default to 246 regardless of license — raise these manually in the PBXware admin GUI (not automatable via the API) if you need more than 246 simultaneous calls.`;
+    statusEl.textContent = `Connected (legacy + v2 keys both verified). Edition: ${result.edition}. License limits — Extensions: ${result.extensions}, Tenants: ${result.tenants}, DIDs: ${result.dids}, VOIP Trunks: ${result.voip_trunks}, Channels: ${result.channels}.`;
 
     const pIdx = step;
     const editionNote = document.getElementById('p' + pIdx + '-edition-note');
@@ -75,7 +79,7 @@ async function testConnection(step) {
     tenantFields.classList.toggle('hidden', !isMultiTenant);
     editionNote.textContent = isMultiTenant
       ? 'Multi-Tenant edition detected — a tenant will be created.'
-      : `"${result.edition}" edition detected — tenant creation is skipped; extensions are created at the system level.`;
+      : `"${result.edition}" edition detected — tenant creation is skipped; extensions are created at the system level. Channel limits and codecs are raised automatically via API v2.`;
 
     window['pending' + step] = req; // stash for provision() to reuse
     showStep('step-provision-' + step);
@@ -106,6 +110,7 @@ async function provision(step) {
     name: document.getElementById('c' + step + '-name').value.trim(),
     base_url: pending.base_url,
     api_key: pending.api_key,
+    api_key_v2: pending.api_key_v2,
     extension_count: parseInt(document.getElementById('p' + step + '-ext-count').value, 10),
     tenant_code: document.getElementById('p' + step + '-tenant-code').value.trim(),
     tenant_name: document.getElementById('p' + step + '-tenant-name').value.trim(),
@@ -134,6 +139,7 @@ async function provision(step) {
       }
       if (p.done) {
         statusEl.textContent = `Done — ${p.created} extensions created.`;
+        if (p.warning) addWizardNotice(p.warning);
         // Left disabled — this step is done and showStep moved us past it.
         if (step === 1) {
           wizardState.server1 = req;
@@ -151,6 +157,17 @@ async function provision(step) {
     statusEl.className = 'status-line error';
     btn.disabled = false;
   }
+}
+
+// addWizardNotice shows a non-fatal provisioning warning in a box at the
+// top of the wizard, which stays visible through the remaining steps
+// (showStep swaps panels, so a step's own status line would disappear).
+function addWizardNotice(text) {
+  const box = document.getElementById('wizard-notices');
+  const p = document.createElement('p');
+  p.textContent = '⚠ ' + text;
+  box.appendChild(p);
+  box.classList.remove('hidden');
 }
 
 function startSecondServer() {
@@ -249,6 +266,9 @@ async function refreshServerList() {
   populateSelect('remote-pair-select', pairs);
 
   document.getElementById('remote-dialer-panel').classList.toggle('disabled-overlay', pairs.length === 0);
+
+  refreshRecordingStatus('local');
+  refreshRecordingStatus('remote');
 }
 
 function populateSelect(id, options) {
@@ -285,6 +305,7 @@ function confirmDial(section, count) {
   if (!confirm(`Start ${count} additional ${section} call(s)?`)) return;
   const duration = parseInt(document.getElementById(section + '-duration').value, 10);
   const useRTP = document.getElementById(section + '-rtp').checked;
+  const codec = document.getElementById(section + '-codec').value;
 
   const target = dialerTarget(section);
   if (!target) return;
@@ -294,10 +315,11 @@ function confirmDial(section, count) {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       section, server_id: serverID, peer_server_id: peerServerID,
-      count, call_duration_seconds: duration, use_rtp: useRTP,
+      count, call_duration_seconds: duration, use_rtp: useRTP, codec,
     }),
   }).then(r => {
-    logLine(`Requested +${count} ${section} calls — ${r.started} started (pool availability may limit this).`);
+    if (r.trunk_note) logLine(r.trunk_note);
+    logLine(`Requested +${count} ${section} calls (${codec}) — ${r.started} started (pool availability may limit this). A log will appear in ${section === 'local' ? 'Local' : 'Remote'} Call Logs once the batch finishes.`);
   }).catch(e => logLine('Error: ' + e.message, true));
 }
 
@@ -313,6 +335,128 @@ function confirmStop(section) {
   }).then(r => {
     logLine(r.stopped ? `Stopped all ${section} calls.` : `No active ${section} session to stop.`);
   }).catch(e => logLine('Error: ' + e.message, true));
+}
+
+// ---------- Dashboard: recording ----------
+//
+// Recording is a property of the target PBXware instance (via API v2), not
+// of SwarmDialer's own session state, so its controls always reflect
+// whatever the server/pair selection currently resolves to — refreshed on
+// selection change and right after every toggle/change, rather than
+// tracked as separate local UI state that could drift from what PBXware
+// actually has set.
+
+// Same target resolution as dialerTarget, but silent on "nothing selected"
+// (returns null) instead of logging to Live Status — refreshRecordingStatus
+// runs on every server-list refresh, including the ordinary case of a
+// single server with no remote pair yet, and that isn't an error worth a
+// log line.
+function recordingDialerTarget(section) {
+  if (section === 'remote') {
+    const pairValue = document.getElementById('remote-pair-select').value;
+    if (!pairValue) return null;
+    const [serverID, peerServerID] = pairValue.split(':');
+    return {serverID, peerServerID};
+  }
+  const serverID = document.getElementById('local-server-select').value;
+  if (!serverID) return null;
+  return {serverID, peerServerID: undefined};
+}
+
+function applyRecordingState(section, st) {
+  const toggleBtn = document.getElementById(section + '-recording-toggle');
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  toggleBtn.textContent = st.enabled ? 'Disable Recording' : 'Enable Recording';
+  toggleBtn.classList.toggle('recording-on', st.enabled);
+  stereoCb.checked = st.stereo_enabled;
+  stereoCb.disabled = !st.enabled;
+  formatSel.disabled = !st.enabled;
+  if (st.format) formatSel.value = st.format;
+  applyCodecRecordingRestriction(section, st.enabled);
+}
+
+// PBXware has no G.729 transcoder (only passthrough), and recording has to
+// decode the audio, so G.729 calls are silently never recorded — confirmed
+// live 2026-09-25 ("No Translation Path" g729 -> slin in Asterisk). While
+// recording is on, G.729 is greyed out; if it was selected, the dialer
+// falls back to G.711 so the next batch actually gets recorded.
+function applyCodecRecordingRestriction(section, recordingOn) {
+  const codecSel = document.getElementById(section + '-codec');
+  const g729 = codecSel.querySelector('option[value="g729"]');
+  g729.disabled = recordingOn;
+  g729.textContent = recordingOn ? 'G.729 (not recordable)' : 'G.729';
+  if (recordingOn && codecSel.value === 'g729') {
+    codecSel.value = 'ulaw';
+    logLine(`${section === 'local' ? 'Local' : 'Remote'} dialer: switched codec from G.729 to G.711 (ulaw), since PBXware can't record G.729 calls.`);
+  }
+}
+
+async function refreshRecordingStatus(section) {
+  const toggleBtn = document.getElementById(section + '-recording-toggle');
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  const statusEl = document.getElementById(section + '-recording-status');
+  const target = recordingDialerTarget(section);
+  if (!target) {
+    toggleBtn.disabled = true;
+    stereoCb.disabled = true;
+    formatSel.disabled = true;
+    statusEl.textContent = '';
+    applyCodecRecordingRestriction(section, false);
+    return;
+  }
+  toggleBtn.disabled = false;
+  try {
+    const st = await api(`/api/recording/status?section=${section}&server_id=${encodeURIComponent(target.serverID)}&peer_server_id=${encodeURIComponent(target.peerServerID || '')}`);
+    applyRecordingState(section, st);
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = 'Error loading recording status: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+}
+
+async function setRecordingState(section, target, enabled, stereo, format, statusEl) {
+  statusEl.textContent = 'Updating...';
+  statusEl.className = 'status-line';
+  try {
+    const st = await api('/api/recording/toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        section, server_id: target.serverID, peer_server_id: target.peerServerID,
+        enabled, stereo, format,
+      }),
+    });
+    applyRecordingState(section, st);
+    statusEl.textContent = '';
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+}
+
+function toggleRecording(section) {
+  const target = recordingDialerTarget(section);
+  if (!target) return;
+  const toggleBtn = document.getElementById(section + '-recording-toggle');
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  const statusEl = document.getElementById(section + '-recording-status');
+  const enabling = toggleBtn.textContent === 'Enable Recording';
+  setRecordingState(section, target, enabling, enabling && stereoCb.checked, formatSel.value, statusEl);
+}
+
+// Fires when the stereo checkbox or format dropdown changes — both are
+// only enabled while recording itself is already on, so this always sends
+// enabled:true alongside whatever changed.
+function onRecordingChange(section) {
+  const target = recordingDialerTarget(section);
+  if (!target) return;
+  const stereoCb = document.getElementById(section + '-recording-stereo');
+  const formatSel = document.getElementById(section + '-recording-format');
+  const statusEl = document.getElementById(section + '-recording-status');
+  setRecordingState(section, target, true, stereoCb.checked, formatSel.value, statusEl);
 }
 
 // ---------- Dashboard: live status ----------
@@ -336,7 +480,9 @@ function connectStatusSockets() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const sock = new WebSocket(`${proto}://${location.host}/ws/status`);
   sock.onmessage = (ev) => {
-    const sessions = (JSON.parse(ev.data).sessions) || [];
+    const msg = JSON.parse(ev.data);
+    const sessions = msg.sessions || [];
+    renderRegistrations(msg.registrations || []);
     renderCombinedStats(sessions);
     renderEvents(sessions);
     renderGraph(sessions);
@@ -379,6 +525,41 @@ function renderEvents(sessions) {
       else if (ev.type === 'ended') logLine(`${tag}ended ${pair} (${ev.detail})`);
       else if (ev.type === 'batch_done') logLine(`${tag}<strong>${ev.detail}</strong>`);
     });
+  });
+}
+
+// Registration progress: a session's first dial registers every one of
+// its extensions before any call starts (~20s+ for 1000), which used to
+// happen with no sign of life in the dashboard. Each registration attempt
+// gets one log line, updated in place until it finishes.
+const registrationRows = new Map(); // registration id -> {row, done}
+
+function registrationText(r) {
+  const fmtSide = (sd) => `${sd.registered}/${sd.total}` + (sd.failed ? ` (${sd.failed} failed)` : '');
+  const sides = Object.entries(r.sides);
+  if (sides.length === 0) return '0 extensions so far';
+  if (sides.length === 1 && sides[0][0] === '') return fmtSide(sides[0][1]);
+  return sides.map(([side, sd]) => `${side} ${fmtSide(sd)}`).join(', ');
+}
+
+function renderRegistrations(regs) {
+  regs.forEach(r => {
+    let entry = registrationRows.get(r.id);
+    if (entry && entry.done) return;
+    const tag = `<span class="tag ${r.type}">${r.label}</span>`;
+    let html, isError = false;
+    if (r.message) html = `${tag}${r.done ? (r.done_message || r.message) : r.message}`;
+    else if (!r.done) html = `${tag}registering extensions: ${registrationText(r)}`;
+    else if (r.error) { html = `${tag}<span class="err">registration failed</span> (${registrationText(r)}): ${r.error}`; isError = true; }
+    else html = `${tag}<span class="ok">registered</span> ${registrationText(r)} extensions, starting calls`;
+    if (!entry) {
+      entry = {row: logLine(html, isError), done: false};
+      registrationRows.set(r.id, entry);
+    } else {
+      entry.row.innerHTML = `[${new Date().toLocaleTimeString()}] ${html}`;
+      entry.row.classList.toggle('error', isError);
+    }
+    entry.done = r.done;
   });
 }
 
@@ -433,6 +614,90 @@ function logLine(html, isError) {
   row.innerHTML = `[${time}] ${html}`;
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
+  return row;
+}
+
+// ---------- Dashboard: log browser ----------
+
+function formatBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// Keeps the log list/count current while the dashboard is open, instead of
+// relying on a one-shot timer guessing when a batch's log will be ready
+// (confirmDial previously scheduled a refresh at duration+15s — too early
+// for a batch whose actual completion, after mosFinalizeDelay and CDR/MOS
+// lookups, ran longer than that guess, leaving the list stuck until the
+// next unrelated trigger like a tab switch). Runs for the life of the
+// page once started — same as the live-status WebSocket, cheap enough
+// not to bother stopping on tab switch.
+let logListPollTimer = null;
+function startLogListPolling() {
+  if (logListPollTimer) return;
+  logListPollTimer = setInterval(() => {
+    refreshLogList('local');
+    refreshLogList('remote');
+  }, 5000);
+}
+
+function toggleLogPanel(section) {
+  document.getElementById(section + '-log-list').classList.toggle('collapsed');
+  document.getElementById(section + '-log-header').classList.toggle('expanded');
+}
+
+async function refreshLogList(section) {
+  const list = document.getElementById(section + '-log-list');
+  const countEl = document.getElementById(section + '-log-count');
+  try {
+    const {logs} = await api('/api/logs?section=' + section);
+    if (countEl) countEl.textContent = logs ? logs.length : 0;
+    if (!logs || logs.length === 0) {
+      list.innerHTML = '<p class="status-line">No logs yet — run a batch of calls to create one.</p>';
+      return;
+    }
+    list.innerHTML = '';
+    logs.forEach(l => {
+      const row = document.createElement('div');
+      row.className = 'log-row';
+      const when = new Date(l.mod_time).toLocaleString();
+      row.innerHTML = `
+        <div class="log-row-info">
+          <div class="log-row-name">${l.name}</div>
+          <div class="log-row-meta">${when} — ${formatBytes(l.size_bytes)}</div>
+        </div>
+        <div class="log-row-actions">
+          <button class="btn secondary" onclick="viewLog('${section}','${l.name}')">View</button>
+          <button class="btn secondary" onclick="downloadLog('${section}','${l.name}')">Download</button>
+          <button class="btn danger" onclick="deleteLog('${section}','${l.name}')">Delete</button>
+        </div>`;
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = `<p class="status-line error">Error loading logs: ${e.message}</p>`;
+  }
+}
+
+function viewLog(section, name) {
+  window.open(`/api/logs/view?section=${encodeURIComponent(section)}&name=${encodeURIComponent(name)}`, '_blank');
+}
+
+function downloadLog(section, name) {
+  window.open(`/api/logs/download?section=${encodeURIComponent(section)}&name=${encodeURIComponent(name)}`, '_blank');
+}
+
+async function deleteLog(section, name) {
+  if (!confirm(`Delete log "${name}"? This cannot be undone.`)) return;
+  try {
+    await api('/api/logs/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({section, name}),
+    });
+    refreshLogList(section);
+  } catch (e) {
+    logLine('Error deleting log: ' + e.message, true);
+  }
 }
 
 // ---------- Settings: reset ----------
@@ -460,9 +725,30 @@ async function refreshSettingsTab() {
 // practice (one job's trunk/tenant delete stepping on the other's, the
 // second's store removal then failing with "no server with id ...").
 function setSettingsResetButtonsDisabled(disabled) {
-  ['reset-instance-1-btn', 'reset-instance-2-btn', 'reset-swarmdialer-btn', 'reset-all-btn'].forEach(id => {
+  ['reset-instance-1-btn', 'reset-instance-2-btn', 'reset-swarmdialer-btn', 'reset-all-btn', 'clear-logs-btn'].forEach(id => {
     document.getElementById(id).disabled = disabled;
   });
+}
+
+async function clearAllLogs() {
+  const btn = document.getElementById('clear-logs-btn');
+  if (btn.disabled) return;
+  if (!confirm('Delete every call log, local and remote? This cannot be undone.')) return;
+
+  setSettingsResetButtonsDisabled(true);
+  const statusEl = document.getElementById('clear-logs-status');
+  statusEl.textContent = 'Clearing...';
+  statusEl.className = 'status-line';
+  try {
+    await api('/api/settings/clear-logs', {method: 'POST'});
+    statusEl.textContent = 'All logs cleared.';
+    refreshLogList('local');
+    refreshLogList('remote');
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+  setSettingsResetButtonsDisabled(false);
 }
 
 // Starts a reset-instance job and polls it to completion, updating

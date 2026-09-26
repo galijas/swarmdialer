@@ -25,7 +25,14 @@ type LicenseInfo struct {
 // anywhere we've found. See docs/pbxware_api_reference.md's License
 // section for that gap.
 func (l LicenseInfo) IsMultiTenant() bool {
-	return strings.EqualFold(l.Edition, "Multi-Tenant")
+	return IsMultiTenantEdition(l.Edition)
+}
+
+// IsMultiTenantEdition is IsMultiTenant's underlying string check, exposed
+// directly for callers that only have a persisted edition string (e.g.
+// store.Server) rather than a freshly-fetched LicenseInfo.
+func IsMultiTenantEdition(edition string) bool {
+	return strings.EqualFold(edition, "Multi-Tenant")
 }
 
 // GetLicenseInfo fetches the current license's edition and limits.

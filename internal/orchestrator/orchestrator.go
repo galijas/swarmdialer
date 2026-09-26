@@ -195,7 +195,7 @@ func makePairs(n int) [][2]int {
 }
 
 func runOnePair(ctx context.Context, cfg Config, sipDomain string, caller *sipua.Phone, callerAOR, calleeAOR string, i int, state *RunState) PairResult {
-	call, err := caller.Dial(ctx, cfg.DialTimeout, cfg.DialDestination, sipDomain, calleeAOR, true)
+	call, err := caller.Dial(ctx, cfg.DialTimeout, cfg.DialDestination, sipDomain, calleeAOR, true, sipua.DefaultCodec)
 	if err != nil {
 		state.updatePair(i, func(p *PairState) {
 			p.Status = StatusFailed

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,7 @@ type Client struct {
 // anything public-facing.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
-		BaseURL: baseURL,
+		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
@@ -256,6 +257,19 @@ func (c *Client) GetTenantChannelLimits(tenantID int) (TenantChannelLimits, erro
 // note that verification only covers the channel limits actually applying,
 // since there's no API-visible signal for "the registration/dialplan
 // brokenness this also fixes is gone."
+// SwarmDialerCodecs is the fixed set of codecs SwarmDialer enables
+// wherever it provisions (tenant-level allowlist via ResaveTenant, and
+// per-extension via ExtensionParams.AllowedCodecs) — everything the
+// dashboard's codec dropdown offers (see sipua.Codec) except GSM, which
+// has no usable pure-Go encoder (see sipua/codec.go). Colon-separated,
+// matching both fields' documented request format.
+const SwarmDialerCodecs = "ulaw:alaw:g722:g729:opus"
+
+// SwarmDialerCodecsList is SwarmDialerCodecs as a slice — v2's codecs
+// fields (ClientV2.PatchTenant) take real JSON arrays instead of a
+// colon-separated string.
+var SwarmDialerCodecsList = []string{"ulaw", "alaw", "g722", "g729", "opus"}
+
 func (c *Client) ResaveTenant(tenantID, limit, extLength int, maxWait time.Duration) error {
 	deadline := time.Now().Add(maxWait)
 	delay := 5 * time.Second
@@ -291,6 +305,13 @@ func (c *Client) ResaveTenant(tenantID, limit, extLength int, maxWait time.Durat
 			"enhanced_ring_groups": {strconv.Itoa(limit)},
 			"aach":                 {strconv.Itoa(limit)},
 			"dahdi":                {strconv.Itoa(limit)},
+			// Per-extension acodecs (see ExtensionParams.AllowedCodecs)
+			// can only select from what's allowed at the tenant level —
+			// confirmed live 2026-09-23: setting an extension's acodecs
+			// to a codec the tenant doesn't itself allow gets silently
+			// dropped, not rejected, which is easy to miss.
+			"localcodecs":  {SwarmDialerCodecs},
+			"remotecodecs": {SwarmDialerCodecs},
 		}
 		for k, v := range identityFields {
 			params[k] = v
@@ -419,6 +440,12 @@ type ExtensionConfig struct {
 	Ext      string
 	Secret   string
 	Username string // what to register with; tenant_code + ext, per PBXware convention
+
+	// AllowedCodecsRaw is the extension's "allow" list as PBXware reports
+	// it back (e.g. "ulaw,0 alaw,0 g722,0"), not just what was requested —
+	// a per-extension acodecs value can only include what the system (or,
+	// for Multi-Tenant, the tenant) already allows.
+	AllowedCodecsRaw string
 }
 
 // GetExtensionConfig fetches an extension's SIP registration details.
@@ -435,10 +462,16 @@ func (c *Client) GetExtensionConfig(server, extensionID int) (ExtensionConfig, e
 		return ExtensionConfig{}, fmt.Errorf("unexpected ext.configuration response shape")
 	}
 	options, _ := entry["options"].(map[string]any)
+	allow, _ := options["allow"].([]any)
+	allowStrs := make([]string, 0, len(allow))
+	for _, a := range allow {
+		allowStrs = append(allowStrs, fmt.Sprint(a))
+	}
 	return ExtensionConfig{
-		Ext:      fmt.Sprint(entry["ext"]),
-		Secret:   fmt.Sprint(options["secret"]),
-		Username: fmt.Sprint(options["username"]),
+		Ext:              fmt.Sprint(entry["ext"]),
+		Secret:           fmt.Sprint(options["secret"]),
+		Username:         fmt.Sprint(options["username"]),
+		AllowedCodecsRaw: strings.Join(allowStrs, " "),
 	}, nil
 }
 

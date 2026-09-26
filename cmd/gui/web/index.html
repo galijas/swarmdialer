@@ -25,13 +25,17 @@
 <!-- ============ SETUP WIZARD ============ -->
 <section id="tab-wizard">
 
+  <!-- Non-fatal warnings from provisioning (e.g. PBXware restart needed) — stays visible across steps -->
+  <div class="panel wizard-notice hidden" id="wizard-notices"></div>
+
   <!-- Step 1: connect server 1 -->
   <div class="panel" id="step-connect-1">
     <h2>Step 1: Connect PBXware</h2>
     <div class="form-grid">
       <div class="form-row"><label>Display name</label><input id="c1-name" value="Server A"></div>
       <div class="form-row"><label>Base URL (e.g. https://10.1.100.208)</label><input id="c1-url" placeholder="https://..."></div>
-      <div class="form-row"><label>API key</label><input id="c1-key" placeholder="apikey"></div>
+      <div class="form-row"><label>Legacy API key</label><input id="c1-key" placeholder="apikey"></div>
+      <div class="form-row"><label>API v2 key</label><input id="c1-key-v2" placeholder="sk-..."></div>
     </div>
     <button class="btn" id="c1-next-btn" onclick="testConnection(1)">Next</button>
     <div class="status-line" id="c1-status"></div>
@@ -68,7 +72,8 @@
     <div class="form-grid">
       <div class="form-row"><label>Display name</label><input id="c2-name" value="Server B"></div>
       <div class="form-row"><label>Base URL</label><input id="c2-url" placeholder="https://..."></div>
-      <div class="form-row"><label>API key</label><input id="c2-key" placeholder="apikey"></div>
+      <div class="form-row"><label>Legacy API key</label><input id="c2-key" placeholder="apikey"></div>
+      <div class="form-row"><label>API v2 key</label><input id="c2-key-v2" placeholder="sk-..."></div>
     </div>
     <button class="btn" id="c2-next-btn" onclick="testConnection(2)">Next</button>
     <div class="status-line" id="c2-status"></div>
@@ -115,9 +120,26 @@
     <h2>Local Dialer</h2>
     <p class="status-line">Places calls between extensions on the same server.</p>
     <div class="form-grid">
-      <div class="form-row"><label>Server</label><select id="local-server-select"></select></div>
+      <div class="form-row"><label>Server</label><select id="local-server-select" onchange="refreshRecordingStatus('local')"></select></div>
       <div class="form-row"><label>Call duration (seconds)</label><input id="local-duration" type="number" value="30"></div>
       <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (silence audio)</label></div>
+      <div class="form-row"><label>Codec</label><select id="local-codec">
+        <option value="ulaw" selected>G.711 (ulaw)</option>
+        <option value="g722">G.722</option>
+        <option value="g729">G.729</option>
+        <option value="opus">Opus</option>
+      </select></div>
+    </div>
+    <div class="recording-row">
+      <button class="btn secondary" id="local-recording-toggle" onclick="toggleRecording('local')">Enable Recording</button>
+      <label class="recording-stereo-label"><input type="checkbox" id="local-recording-stereo" disabled onchange="onRecordingChange('local')"> <span class="stereo-warning">Stereo Recording (resource intensive)</span></label>
+      <select id="local-recording-format" disabled onchange="onRecordingChange('local')">
+        <option value="wav49" selected>wav49</option>
+        <option value="wav">wav</option>
+        <option value="gsm">gsm</option>
+        <option value="ogg">ogg</option>
+      </select>
+      <span class="status-line" id="local-recording-status"></span>
     </div>
     <div class="increment-row">
       <div class="increment-buttons">
@@ -132,13 +154,37 @@
     </div>
   </div>
 
+  <div class="panel">
+    <h2 class="collapsible-header" id="local-log-header" onclick="toggleLogPanel('local')">
+      <span class="chevron">&#9656;</span> Local Call Logs <span class="badge" id="local-log-count">0</span>
+    </h2>
+    <div id="local-log-list" class="log-list collapsed"></div>
+  </div>
+
   <div class="panel" id="remote-dialer-panel">
     <h2>Remote Dialer</h2>
     <p class="status-line">Places calls from one connected server's extensions to another's, over the trunk between them (via DID).</p>
     <div class="form-grid">
-      <div class="form-row"><label>Server pair</label><select id="remote-pair-select"></select></div>
+      <div class="form-row"><label>Server pair</label><select id="remote-pair-select" onchange="refreshRecordingStatus('remote')"></select></div>
       <div class="form-row"><label>Call duration (seconds)</label><input id="remote-duration" type="number" value="30"></div>
       <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (silence audio)</label></div>
+      <div class="form-row"><label>Codec</label><select id="remote-codec">
+        <option value="ulaw" selected>G.711 (ulaw)</option>
+        <option value="g722">G.722</option>
+        <option value="g729">G.729</option>
+        <option value="opus">Opus</option>
+      </select></div>
+    </div>
+    <div class="recording-row">
+      <button class="btn secondary" id="remote-recording-toggle" onclick="toggleRecording('remote')">Enable Recording</button>
+      <label class="recording-stereo-label"><input type="checkbox" id="remote-recording-stereo" disabled onchange="onRecordingChange('remote')"> <span class="stereo-warning">Stereo Recording (resource intensive)</span></label>
+      <select id="remote-recording-format" disabled onchange="onRecordingChange('remote')">
+        <option value="wav49" selected>wav49</option>
+        <option value="wav">wav</option>
+        <option value="gsm">gsm</option>
+        <option value="ogg">ogg</option>
+      </select>
+      <span class="status-line" id="remote-recording-status"></span>
     </div>
     <div class="increment-row">
       <div class="increment-buttons">
@@ -151,8 +197,13 @@
       </div>
       <button class="btn stop" onclick="confirmStop('remote')">Stop All</button>
     </div>
-      </div>
-    </div>
+  </div>
+
+  <div class="panel">
+    <h2 class="collapsible-header" id="remote-log-header" onclick="toggleLogPanel('remote')">
+      <span class="chevron">&#9656;</span> Remote Call Logs <span class="badge" id="remote-log-count">0</span>
+    </h2>
+    <div id="remote-log-list" class="log-list collapsed"></div>
   </div>
 
   <div class="panel">
@@ -189,15 +240,22 @@
   </div>
 
   <div class="panel">
+    <h2>Call Logs</h2>
+    <p class="status-line">Deletes every saved call-batch log, both local and remote.</p>
+    <button class="btn danger" id="clear-logs-btn" onclick="clearAllLogs()">Clear All Logs</button>
+    <div class="status-line" id="clear-logs-status"></div>
+  </div>
+
+  <div class="panel">
     <h2>Reset SwarmDialer</h2>
-    <p class="status-line">Deletes SwarmDialer's saved configuration and restarts the GUI, back to a fresh-deployment state. Does not touch anything on PBXware — reset the instances above first if you want those cleaned up too.</p>
+    <p class="status-line">Deletes SwarmDialer's saved configuration and all call logs, then restarts the GUI, back to a fresh-deployment state. Does not touch anything on PBXware — reset the instances above first if you want those cleaned up too.</p>
     <button class="btn danger" id="reset-swarmdialer-btn" onclick="resetSwarmDialer()">Reset SwarmDialer to Default</button>
     <div class="status-line" id="reset-swarmdialer-status"></div>
   </div>
 
   <div class="panel">
     <h2>Full Reset</h2>
-    <p class="status-line">Resets every connected instance, then resets SwarmDialer itself. This cannot be undone.</p>
+    <p class="status-line">Resets every connected instance, then resets SwarmDialer itself (including all call logs). This cannot be undone.</p>
     <button class="btn danger" id="reset-all-btn" onclick="resetAll()">Reset All Instances &amp; SwarmDialer VPS</button>
     <div class="status-line" id="reset-all-status"></div>
   </div>

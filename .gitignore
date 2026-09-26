@@ -16,3 +16,7 @@ extensions*.json
 # portability requirement).
 swarmdialer_config*.json
 
+# Per-deployment call-batch logs (see internal/logstore) — runtime output,
+# not part of the repo, same reasoning as swarmdialer_config*.json above.
+/logs/
+

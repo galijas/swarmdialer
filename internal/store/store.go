@@ -28,11 +28,12 @@ type DIDMapping struct {
 // Server is one connected PBXware instance and everything provisioned on
 // it so far.
 type Server struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
-	Edition string `json:"edition"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"` // legacy (v1) API key
+	APIKeyV2 string `json:"api_key_v2"`
+	Edition  string `json:"edition"`
 
 	// SIPHost is the actual network destination for SIP (host:port,
 	// usually the same host as BaseURL on port 5060). LocalIP is our own
@@ -41,7 +42,7 @@ type Server struct {
 	SIPHost string `json:"sip_host"`
 	LocalIP string `json:"local_ip"`
 
-	TenantID   int    `json:"tenant_id"`   // 0 if this edition skips tenant creation
+	TenantID   int    `json:"tenant_id"` // 0 if this edition skips tenant creation
 	TenantCode string `json:"tenant_code"`
 
 	Extensions []pbxware.ProvisionedExtension `json:"extensions"`

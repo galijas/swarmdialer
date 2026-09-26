@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"swarmdialer/internal/logstore"
 	"swarmdialer/internal/orchestrator"
 	"swarmdialer/internal/pbxware"
 	"swarmdialer/internal/sipua"
@@ -36,8 +37,9 @@ func writeError(w http.ResponseWriter, status int, err error) {
 // --- Wizard: test connection ---
 
 type testConnectionRequest struct {
-	BaseURL string `json:"base_url"`
-	APIKey  string `json:"api_key"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"` // legacy (v1) API key
+	APIKeyV2 string `json:"api_key_v2"`
 }
 
 func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +52,8 @@ func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	result, err := wizard.TestConnection(req.BaseURL, req.APIKey)
+	req.BaseURL = normalizeBaseURL(req.BaseURL)
+	result, err := wizard.TestConnection(req.BaseURL, req.APIKey, req.APIKeyV2)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -72,7 +75,8 @@ func (a *app) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 type provisionRequest struct {
 	Name           string `json:"name"`
 	BaseURL        string `json:"base_url"`
-	APIKey         string `json:"api_key"`
+	APIKey         string `json:"api_key"` // legacy (v1) API key
+	APIKeyV2       string `json:"api_key_v2"`
 	ExtensionCount int    `json:"extension_count"`
 	TenantCode     string `json:"tenant_code"`
 	TenantName     string `json:"tenant_name"`
@@ -101,12 +105,12 @@ func (a *app) handleProvision(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		srv, err := wizard.Provision(a.ctx, wizard.ProvisionParams{
-			Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey,
+			Name: req.Name, BaseURL: normalizeBaseURL(req.BaseURL), APIKey: req.APIKey, APIKeyV2: req.APIKeyV2,
 			ExtensionCount: req.ExtensionCount,
 			TenantCode:     req.TenantCode, TenantName: req.TenantName,
 			ExtLength: req.ExtLength,
 			Country:   req.Country, National: req.National, International: req.International,
-			ChannelLimit: 600, MaxWait: 10 * time.Minute,
+			ChannelLimit: 1000, MaxWait: 10 * time.Minute,
 		}, progress)
 		if err != nil {
 			return // progress already carries the error
@@ -220,6 +224,7 @@ type dialRequest struct {
 	Count               int    `json:"count"`
 	CallDurationSeconds int    `json:"call_duration_seconds"`
 	UseRTP              bool   `json:"use_rtp"`
+	Codec               string `json:"codec"` // "ulaw" (default), "g722", "g729", or "opus" — see sipua.Codec
 }
 
 func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +243,16 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	logSection, reportLabel, reportClient, reportServerID, err := a.batchReportTarget(req.Section, req.ServerID, req.PeerServerID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	codec := sipua.Codec(req.Codec)
+	if !sipua.IsValidCodec(codec) {
+		codec = sipua.DefaultCodec
+	}
 
 	callDuration := time.Duration(req.CallDurationSeconds) * time.Second
 	// 200ms was too aggressive at scale — a live GUI test with 200
@@ -246,8 +261,41 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 	// the last empirically-safe value found during small-scale testing;
 	// re-tune from real data as testing moves to higher call counts.
 	const rampInterval = 800 * time.Millisecond
-	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP)
-	writeJSON(w, http.StatusOK, map[string]int{"started": started})
+	// Captured once here, at batch start, rather than re-read when the
+	// batch finishes — recording is a per-batch property (whatever it was
+	// set to for these calls), not something that should reflect a toggle
+	// flip made later while the batch was still running.
+	recording, recordingKnown := a.currentRecordingStatus(req.Section, req.ServerID, req.PeerServerID)
+
+	// Remote calls cross the trunk between the two instances, whose codec
+	// order has to match this batch's codec — see prepareRemoteBatch.
+	trunkNote, release := "", func() {}
+	if req.Section == "remote" {
+		srv, peer := a.store.GetServer(req.ServerID), a.store.GetServer(req.PeerServerID)
+		if srv == nil || peer == nil {
+			writeError(w, http.StatusBadRequest, errServerNotFound)
+			return
+		}
+		note, rel, err := a.prepareRemoteBatch(srv, peer, string(codec))
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, errTrunkCodecBusy) {
+				status = http.StatusConflict
+			}
+			writeError(w, status, err)
+			return
+		}
+		trunkNote, release = note, rel
+	}
+
+	started := sess.AddCalls(req.Count, callDuration, rampInterval, req.UseRTP, codec, func(records []orchestrator.CallRecord) {
+		release() // every call has ended; the trunk is free for another codec
+		a.reportBatch(logSection, reportLabel, reportClient, reportServerID, sess, req.Count, records, recording, recordingKnown)
+	})
+	if started == 0 {
+		release() // no batch started, so onBatchDone never runs
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"started": started, "trunk_note": trunkNote})
 }
 
 // sessionFor returns the session for dialing from serverID — for "local"
@@ -257,64 +305,136 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 // pair), so multiple servers/pairs can each have their own live session
 // at once rather than sharing one implicit "the local server" slot.
 func (a *app) sessionFor(section, serverID, peerServerID string) (*orchestrator.Session, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	for {
+		a.mu.Lock()
+		if serverID == "" {
+			a.mu.Unlock()
+			return nil, errNoServerChosen
+		}
+		srv := a.store.GetServer(serverID)
+		if srv == nil {
+			a.mu.Unlock()
+			return nil, errServerNotFound
+		}
 
-	if serverID == "" {
-		return nil, errNoServerChosen
+		var (
+			key, label string
+			create     func(orchestrator.RegisterProgressFunc) (*orchestrator.Session, error)
+			save       func(*orchestrator.Session)
+		)
+		if section == "remote" {
+			if peerServerID == "" {
+				a.mu.Unlock()
+				return nil, errNoPeerChosen
+			}
+			peer := a.store.GetServer(peerServerID)
+			if peer == nil {
+				a.mu.Unlock()
+				return nil, errServerNotFound
+			}
+			if srv.PeerServerID != peer.ID {
+				a.mu.Unlock()
+				return nil, errNotConnected
+			}
+			pairKey := serverID + "|" + peerServerID
+			if sess, ok := a.remoteSessions[pairKey]; ok {
+				a.mu.Unlock()
+				return sess, nil
+			}
+			key, label = "remote:"+pairKey, srv.Name+" → "+peer.Name
+			cfg := orchestrator.RemoteSessionConfig{
+				CallerDialDestination: srv.SIPHost, CallerSIPDomain: srv.SIPHost,
+				CalleeDialDestination: peer.SIPHost, CalleeSIPDomain: peer.SIPHost,
+				LocalIP:         srv.LocalIP,
+				CallerBasePort:  a.allocPortRangeLocked(len(srv.Extensions)),
+				CalleeBasePort:  a.allocPortRangeLocked(len(peer.Extensions)),
+				RegisterTimeout: 15 * time.Second,
+				DialTimeout:     15 * time.Second,
+			}
+			callers, callees, dids := toEndpoints(srv.Extensions), toEndpoints(peer.Extensions), didLookup(peer)
+			create = func(progress orchestrator.RegisterProgressFunc) (*orchestrator.Session, error) {
+				cfg.OnRegisterProgress = progress
+				return orchestrator.NewRemoteSession(a.ctx, cfg, callers, callees, dids)
+			}
+			save = func(sess *orchestrator.Session) { a.remoteSessions[pairKey] = sess }
+		} else {
+			if sess, ok := a.localSessions[serverID]; ok {
+				a.mu.Unlock()
+				return sess, nil
+			}
+			key, label = "local:"+serverID, srv.Name
+			cfg := orchestrator.SessionConfig{
+				DialDestination: srv.SIPHost, SIPDomain: srv.SIPHost,
+				LocalIP:         srv.LocalIP,
+				BaseLocalPort:   a.allocPortRangeLocked(len(srv.Extensions)),
+				RegisterTimeout: 15 * time.Second,
+				DialTimeout:     15 * time.Second,
+			}
+			endpoints := toEndpoints(srv.Extensions)
+			create = func(progress orchestrator.RegisterProgressFunc) (*orchestrator.Session, error) {
+				cfg.OnRegisterProgress = progress
+				return orchestrator.NewSession(a.ctx, cfg, endpoints)
+			}
+			save = func(sess *orchestrator.Session) { a.localSessions[serverID] = sess }
+		}
+
+		// Another dial for the same session is already registering its
+		// extensions: wait for that instead of registering them twice,
+		// then look again (it may have failed, in which case this one
+		// tries itself).
+		if ch, ok := a.pendingSessions[key]; ok {
+			a.mu.Unlock()
+			<-ch
+			continue
+		}
+		done := make(chan struct{})
+		a.pendingSessions[key] = done
+		a.mu.Unlock()
+
+		// Registering every extension takes a while (20ms stagger per
+		// extension plus PBXware's replies — ~20s+ for 1000), so it runs
+		// without holding a.mu: holding it here froze the live status feed
+		// (allSnapshots needs a.mu) for the whole registration.
+		reg := a.startRegistration(key, section, label)
+		sess, err := create(reg.update)
+		reg.finish(err)
+
+		a.mu.Lock()
+		delete(a.pendingSessions, key)
+		if err == nil {
+			save(sess)
+		}
+		a.mu.Unlock()
+		close(done)
+		return sess, err
 	}
+}
+
+// batchReportTarget resolves what reportBatch needs to log/query MOS for
+// a dial request: which log section it belongs in, a human-readable
+// label for the log file/live-status line, and the PBXware client +
+// server/tenant ID to query CDRs against. That's always the *caller's*
+// own instance — for a remote batch, a cross-instance call's CDR is
+// recorded on the side that originated it, not the callee's.
+func (a *app) batchReportTarget(section, serverID, peerServerID string) (logstore.Section, string, *pbxware.Client, int, error) {
 	srv := a.store.GetServer(serverID)
 	if srv == nil {
-		return nil, errServerNotFound
+		return "", "", nil, 0, errServerNotFound
+	}
+	client := pbxware.NewClient(srv.BaseURL, srv.APIKey)
+	cdrServerID := srv.TenantID
+	if cdrServerID == 0 {
+		cdrServerID = 1 // non-Multi-Tenant: extensions/CDRs live at system level
 	}
 
 	if section == "remote" {
-		if peerServerID == "" {
-			return nil, errNoPeerChosen
-		}
 		peer := a.store.GetServer(peerServerID)
 		if peer == nil {
-			return nil, errServerNotFound
+			return "", "", nil, 0, errServerNotFound
 		}
-		if srv.PeerServerID != peer.ID {
-			return nil, errNotConnected
-		}
-
-		key := serverID + "|" + peerServerID
-		if sess, ok := a.remoteSessions[key]; ok {
-			return sess, nil
-		}
-		sess, err := orchestrator.NewRemoteSession(a.ctx, orchestrator.RemoteSessionConfig{
-			CallerDialDestination: srv.SIPHost, CallerSIPDomain: srv.SIPHost,
-			CalleeDialDestination: peer.SIPHost, CalleeSIPDomain: peer.SIPHost,
-			LocalIP:         srv.LocalIP,
-			CallerBasePort:  a.allocPortRangeLocked(len(srv.Extensions)),
-			CalleeBasePort:  a.allocPortRangeLocked(len(peer.Extensions)),
-			RegisterTimeout: 15 * time.Second,
-			DialTimeout:     15 * time.Second,
-		}, toEndpoints(srv.Extensions), toEndpoints(peer.Extensions), didLookup(peer))
-		if err != nil {
-			return nil, err
-		}
-		a.remoteSessions[key] = sess
-		return sess, nil
+		return logstore.SectionRemote, srv.Name + " to " + peer.Name, client, cdrServerID, nil
 	}
-
-	if sess, ok := a.localSessions[serverID]; ok {
-		return sess, nil
-	}
-	sess, err := orchestrator.NewSession(a.ctx, orchestrator.SessionConfig{
-		DialDestination: srv.SIPHost, SIPDomain: srv.SIPHost,
-		LocalIP:         srv.LocalIP,
-		BaseLocalPort:   a.allocPortRangeLocked(len(srv.Extensions)),
-		RegisterTimeout: 15 * time.Second,
-		DialTimeout:     15 * time.Second,
-	}, toEndpoints(srv.Extensions))
-	if err != nil {
-		return nil, err
-	}
-	a.localSessions[serverID] = sess
-	return sess, nil
+	return logstore.SectionLocal, srv.Name, client, cdrServerID, nil
 }
 
 // allocPortRangeLocked is allocPortRange without re-locking a.mu — callers
@@ -386,7 +506,7 @@ func didLookup(srv *store.Server) map[string]string {
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": a.allSnapshots()})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": a.allSnapshots(), "registrations": a.registrationSnapshots()})
 }
 
 // --- Settings: reset ---
@@ -471,12 +591,14 @@ func (a *app) handleResetInstanceStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, progress.Snapshot())
 }
 
-// handleResetSwarmDialer deletes the persisted config file and restarts
-// the GUI process in place (see restartProcess) — the equivalent of a
-// fresh deployment with no server configured, without touching anything
-// on PBXware itself. The restart happens after the response is sent (in a
-// short-delayed goroutine) so the browser actually sees success before
-// the process image is replaced.
+// handleResetSwarmDialer deletes the persisted config file and every call
+// log, then restarts the GUI process in place (see restartProcess) — the
+// equivalent of a fresh deployment with no server configured and no call
+// history, without touching anything on PBXware itself. Also what
+// resetAll's frontend flow ends with, so "reset all" clears logs too
+// without needing separate handling. The restart happens after the
+// response is sent (in a short-delayed goroutine) so the browser actually
+// sees success before the process image is replaced.
 func (a *app) handleResetSwarmDialer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -486,10 +608,21 @@ func (a *app) handleResetSwarmDialer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if err := a.logs.DeleteAll(); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		restartProcess()
 	}()
+}
+
+// normalizeBaseURL trims whitespace and trailing slashes from a PBXware
+// base URL as typed in the wizard ("https://10.1.101.11/" is common), so
+// the stored form is consistent and path joins don't produce "//api/...".
+func normalizeBaseURL(u string) string {
+	return strings.TrimRight(strings.TrimSpace(u), "/")
 }
