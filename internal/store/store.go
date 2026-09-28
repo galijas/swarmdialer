@@ -53,9 +53,41 @@ type Server struct {
 	DIDs         []DIDMapping `json:"dids,omitempty"`
 }
 
+// VPSRef identifies one VPS on the SERVERware controller.
+type VPSRef struct {
+	ID   int    `json:"id"`
+	UUID string `json:"uuid"`
+	Name string `json:"name"`
+}
+
+// Serverware is the SERVERware site the connected PBXware instances (and
+// SwarmDialer itself) run on, used for host monitoring during the test
+// script. All three VPSs must be on the same host (HostID).
+type Serverware struct {
+	ControllerURL string `json:"controller_url"`
+	APIKey        string `json:"api_key"`
+
+	HostID   int    `json:"host_id"`
+	HostUUID string `json:"host_uuid"`
+	HostName string `json:"host_name"`
+
+	// PBXwareVPS maps a connected server's ID (Server.ID) to its VPS.
+	PBXwareVPS     map[string]VPSRef `json:"pbxware_vps"`
+	SwarmDialerVPS VPSRef            `json:"swarmdialer_vps"`
+}
+
+// DTCollector is where finished test reports are uploaded. URL empty means
+// the built-in default (see dtcollector.DefaultURL).
+type DTCollector struct {
+	URL string `json:"url,omitempty"`
+	Key string `json:"key,omitempty"`
+}
+
 // Config is the full persisted state.
 type Config struct {
-	Servers []*Server `json:"servers"`
+	Servers     []*Server    `json:"servers"`
+	Serverware  *Serverware  `json:"serverware,omitempty"`
+	DTCollector *DTCollector `json:"dt_collector,omitempty"`
 }
 
 // Store guards Config with a mutex and persists it to path on every
@@ -136,6 +168,43 @@ func (s *Store) UpdateServer(srv *Server) error {
 		}
 	}
 	return fmt.Errorf("no server with id %q", srv.ID)
+}
+
+// Serverware returns a copy of the SERVERware connection, or nil if none.
+func (s *Store) Serverware() *Serverware {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Serverware == nil {
+		return nil
+	}
+	cp := *s.cfg.Serverware
+	return &cp
+}
+
+// SetServerware saves (or, with nil, removes) the SERVERware connection.
+func (s *Store) SetServerware(sw *Serverware) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.Serverware = sw
+	return s.save()
+}
+
+// DTCollector returns a copy of the DT Collector settings (never nil).
+func (s *Store) DTCollector() DTCollector {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.DTCollector == nil {
+		return DTCollector{}
+	}
+	return *s.cfg.DTCollector
+}
+
+// SetDTCollector saves the DT Collector settings.
+func (s *Store) SetDTCollector(dt DTCollector) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.DTCollector = &dt
+	return s.save()
 }
 
 // RemoveServer deletes the server with the given ID and persists — used by

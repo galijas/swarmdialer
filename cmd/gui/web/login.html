@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SwarmDialer Login</title>
+<link rel="icon" type="image/svg+xml" href="/icons/logo-white.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <img src="/icons/logo-white.svg" alt="" class="brand-icon">
+    <h1>SwarmDialer</h1>
+  </div>
+</header>
+
+<main>
+  <div class="panel login-panel">
+    <h2>Log in</h2>
+    <form id="login-form">
+      <div class="form-row"><label for="login-username">Username</label><input id="login-username" autocomplete="username" value="admin" required></div>
+      <div class="form-row"><label for="login-password">Password</label><input id="login-password" type="password" autocomplete="current-password" required autofocus></div>
+      <button class="btn" type="submit" id="login-btn">Log in</button>
+      <p class="status-line" id="login-status"></p>
+    </form>
+  </div>
+</main>
+
+<script src="/login.js"></script>
+</body>
+</html>

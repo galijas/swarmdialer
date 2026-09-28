@@ -237,6 +237,10 @@ func (a *app) handleDial(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if a.testRunning() {
+		writeError(w, http.StatusConflict, errors.New("the SERVERware test script is running; manual dialing is paused until it finishes, so it doesn't disturb the measurements"))
+		return
+	}
 
 	sess, err := a.sessionFor(req.Section, req.ServerID, req.PeerServerID)
 	if err != nil {

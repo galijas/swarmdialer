@@ -528,3 +528,56 @@ button.btn.secondary.recording-on {
   color: var(--accent);
 }
 .wizard-notice p { margin: 0.25em 0; }
+
+.login-panel {
+  max-width: 360px;
+  margin: 60px auto 0;
+}
+
+nav.tabs button.logout {
+  margin-left: 12px;
+  opacity: 0.8;
+}
+
+.sw-steps {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+.sw-steps li { margin: 4px 0; }
+.sw-steps li.warn { color: var(--accent); }
+
+/* ---------- SERVERware Monitoring ---------- */
+.checklist { list-style: none; padding: 0; margin: 0; font-size: 14px; }
+.checklist li { margin: 6px 0; }
+.checklist .ok { color: var(--ok); }
+.checklist .bad { color: var(--danger); }
+.checklist .warn { color: var(--accent); }
+.checklist .note { color: var(--muted); font-size: 13px; margin-left: 6px; }
+
+.mon-table { border-collapse: collapse; font-size: 13px; margin: 8px 0 14px; font-variant-numeric: tabular-nums; }
+.mon-table th, .mon-table td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; white-space: nowrap; }
+.mon-table th { color: var(--muted); font-weight: 600; background: var(--panel-alt); }
+.table-scroll { overflow-x: auto; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+.tile { background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.tile .v { font-family: var(--mono); font-size: 18px; color: var(--text); }
+.tile .k { font-size: 12px; color: var(--muted); }
+
+.mon-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.mon-chart { margin: 0; background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.mon-chart figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.mon-chart svg { width: 100%; height: 160px; display: block; }
+.mon-chart .grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.mon-chart .axis-label { fill: var(--muted); font-size: 11px; }
+.mon-chart .line { fill: none; stroke: var(--local); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.mon-chart .cursor { stroke: var(--muted); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.mon-chart .readout { fill: var(--text); font-size: 12px; font-family: var(--mono); }
+
+.mon-sub { font-size: 13px; color: var(--muted); margin: 18px 0 4px; font-weight: 600; }
+.mon-log { font-family: var(--mono); font-size: 12px; max-height: 240px; overflow-y: auto; background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; white-space: pre-wrap; }
+
+.wipe-prompt { margin-top: 12px; padding: 12px; border: 1px solid var(--danger); border-radius: var(--radius); background: var(--panel-alt); font-size: 14px; }
+.wipe-prompt p { margin: 0 0 10px; }

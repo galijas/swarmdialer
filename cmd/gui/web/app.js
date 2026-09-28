@@ -13,6 +13,9 @@ function showTab(name) {
   document.getElementById('tab-wizard').classList.toggle('hidden', name !== 'wizard');
   document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
   document.getElementById('tab-settings').classList.toggle('hidden', name !== 'settings');
+  document.getElementById('tab-monitoring').classList.toggle('hidden', name !== 'monitoring');
+  document.getElementById('tab-btn-monitoring').classList.toggle('active', name === 'monitoring');
+  if (name === 'monitoring') startMonitoringPolling(); else stopMonitoringPolling();
   document.getElementById('tab-btn-wizard').classList.toggle('active', name === 'wizard');
   document.getElementById('tab-btn-dashboard').classList.toggle('active', name === 'dashboard');
   document.getElementById('tab-btn-settings').classList.toggle('active', name === 'settings');
@@ -29,17 +32,28 @@ function showTab(name) {
 }
 
 function showStep(id) {
-  ['step-connect-1', 'step-provision-1', 'step-add-another', 'step-connect-2', 'step-provision-2', 'step-connect-trunk']
+  ['step-connect-1', 'step-provision-1', 'step-add-another', 'step-connect-2', 'step-provision-2', 'step-connect-trunk', 'step-serverware']
     .forEach(s => document.getElementById(s).classList.toggle('hidden', s !== id));
+  if (id === 'step-serverware') prefillDTURL();
 }
 
 // ---------- API helpers ----------
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
+  if (res.status === 401) {
+    // Session expired or logged out elsewhere: back to the login page.
+    location.href = '/login.html';
+    throw new Error('login required');
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || res.statusText);
   return body;
+}
+
+async function logout() {
+  await fetch('/api/logout', {method: 'POST'}).catch(() => {});
+  location.href = '/login.html';
 }
 
 function poll(fn, intervalMs, untilDone) {
@@ -168,6 +182,69 @@ function addWizardNotice(text) {
   p.textContent = '⚠ ' + text;
   box.appendChild(p);
   box.classList.remove('hidden');
+}
+
+// ---------- Wizard: SERVERware ----------
+
+async function connectServerware() {
+  const btn = document.getElementById('sw-connect-btn');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const skip = document.getElementById('sw-skip-btn');
+  skip.disabled = true;
+  const statusEl = document.getElementById('sw-status');
+  const stepsEl = document.getElementById('sw-steps');
+  stepsEl.innerHTML = '';
+  statusEl.textContent = 'Starting...';
+  statusEl.className = 'status-line';
+
+  const req = {
+    controller: document.getElementById('sw-controller').value.trim(),
+    api_key: document.getElementById('sw-key').value.trim(),
+    dt_collector_url: document.getElementById('sw-dt-url').value.trim(),
+    dt_collector_key: document.getElementById('sw-dt-key').value.trim(),
+  };
+  const retry = (msg) => {
+    statusEl.textContent = 'Error: ' + msg;
+    statusEl.className = 'status-line error';
+    btn.disabled = false;
+    skip.disabled = false;
+  };
+  try {
+    const {job_id} = await api('/api/wizard/serverware', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req),
+    });
+    poll(() => api('/api/wizard/serverware/status?job_id=' + job_id), 2000, (p) => {
+      stepsEl.innerHTML = '';
+      (p.steps || []).forEach(t => {
+        const li = document.createElement('li');
+        li.textContent = '✓ ' + t;
+        stepsEl.appendChild(li);
+      });
+      (p.warnings || []).forEach(t => {
+        const li = document.createElement('li');
+        li.className = 'warn';
+        li.textContent = '⚠ ' + t;
+        stepsEl.appendChild(li);
+      });
+      statusEl.textContent = p.message ? p.message + '...' : '';
+      if (p.error) { retry(p.error); return true; }
+      if (p.done) {
+        statusEl.textContent = 'SERVERware connected.';
+        document.getElementById('sw-complete-btn').classList.remove('hidden');
+        return true;
+      }
+      return false;
+    });
+  } catch (e) {
+    retry(e.message);
+  }
+}
+
+async function prefillDTURL() {
+  const el = document.getElementById('sw-dt-url');
+  if (el.value) return;
+  try { el.value = (await api('/api/dtcollector')).url; } catch (e) { /* placeholder stays */ }
 }
 
 function startSecondServer() {
@@ -702,7 +779,59 @@ async function deleteLog(section, name) {
 
 // ---------- Settings: reset ----------
 
+async function refreshServerwareSettings() {
+  const el = document.getElementById('sw-settings-status');
+  const btn = document.getElementById('sw-settings-btn');
+  try {
+    const sw = await api('/api/serverware');
+    if (!sw.configured) {
+      el.textContent = 'Not connected. Connect the SERVERware site to use host monitoring and the test script.';
+      btn.textContent = 'Connect SERVERware';
+      return;
+    }
+    el.textContent = `Connected to ${sw.controller_url}, host ${sw.host_name} (VPSs: ${sw.vps_names.join(', ')}). ` +
+      (sw.dt_collector_configured ? `Reports upload to ${sw.dt_collector_url}.` : 'DT Collector not set yet.');
+    btn.textContent = 'Reconnect SERVERware';
+  } catch (e) {
+    el.textContent = 'Error loading SERVERware status: ' + e.message;
+  }
+}
+
+async function refreshDTCollectorSettings() {
+  try {
+    const dt = await api('/api/dtcollector');
+    document.getElementById('dt-url').value = dt.url;
+    const key = document.getElementById('dt-key');
+    key.value = '';
+    key.placeholder = dt.key_set ? 'saved (leave empty to keep it)' : 'not set';
+  } catch (e) {
+    document.getElementById('dt-status').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function saveDTCollector() {
+  const btn = document.getElementById('dt-save-btn');
+  const statusEl = document.getElementById('dt-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Checking the key with DT Collector...';
+  statusEl.className = 'status-line';
+  try {
+    await api('/api/dtcollector', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: document.getElementById('dt-url').value.trim(), key: document.getElementById('dt-key').value.trim()}),
+    });
+    statusEl.textContent = 'Saved. DT Collector accepted the upload key.';
+    refreshDTCollectorSettings();
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+  btn.disabled = false;
+}
+
 async function refreshSettingsTab() {
+  refreshServerwareSettings();
+  refreshDTCollectorSettings();
   const {servers} = await api('/api/servers');
   [0, 1].forEach(i => {
     const btn = document.getElementById(`reset-instance-${i + 1}-btn`);
@@ -874,3 +1003,223 @@ async function waitForRestart(statusEl) {
     // silently failing somewhere less obvious.
   }
 })();
+
+// ---------- SERVERware Monitoring ----------
+
+let monProfiles = [];
+let monTimer = null;
+
+const PHASES = {baseline: 'Idle baseline', ramp: 'Ramping up', hold: 'Holding at target', rolling: 'Rolling calls', stopping: 'Stopping calls', cooldown: 'Cooldown'};
+const STOP_REASONS = {
+  target_reached: 'Target reached', target_not_reached: 'Target not reached', host_cpu_100: 'Host CPU saturated',
+  host_ram_100: 'Host memory full', vps_cpu_limit: 'VPS CPU limit reached', vps_ram_limit: 'VPS memory limit reached',
+  swarmdialer_overloaded: 'SwarmDialer overloaded (result invalid)', cancelled: 'Cancelled', error: 'Error',
+};
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fmt1 = (v) => (v === undefined || v === null) ? '–' : (Math.round(v * 10) / 10).toString();
+
+function startMonitoringPolling() {
+  refreshMonitoring(true);
+  if (!monTimer) monTimer = setInterval(() => refreshMonitoring(false), 3000);
+}
+function stopMonitoringPolling() {
+  if (monTimer) { clearInterval(monTimer); monTimer = null; }
+}
+
+async function refreshMonitoring(full) {
+  try {
+    if (full || monProfiles.length === 0) {
+      monProfiles = await api('/api/testrun/profiles');
+      const sel = document.getElementById('mon-profile');
+      const keep = sel.value;
+      sel.innerHTML = monProfiles.map(p => `<option value="${esc(p.name)}">${esc(p.name)} v${p.version} (about ${p.estimate_min} min)</option>`).join('');
+      if (keep) sel.value = keep;
+      renderProfileTests();
+    }
+    const [ready, st, rep] = await Promise.all([api('/api/testrun/readiness'), api('/api/testrun/status'), api('/api/testrun/report')]);
+    renderReadiness(ready);
+    renderRun(st, ready.ready);
+    renderReport(rep, st);
+  } catch (e) {
+    document.getElementById('mon-start-status').textContent = 'Error: ' + e.message;
+  }
+}
+
+function renderReadiness(ready) {
+  document.getElementById('mon-checks').innerHTML = ready.checks.map(c => {
+    const cls = c.ok ? 'ok' : (c.warn ? 'warn' : 'bad');
+    const mark = c.ok ? '✓' : (c.warn ? '⚠' : '✗');
+    return `<li><span class="${cls}">${mark}</span> ${esc(c.label)}<span class="note">${esc(c.note)}</span></li>`;
+  }).join('');
+}
+
+function describeTest(t) {
+  const codec = t.caller_codec === t.callee_codec ? t.caller_codec : `${t.caller_codec} → ${t.callee_codec} (transcoding)`;
+  const rec = {off: 'no recording', mono: 'mono recording', stereo: 'stereo recording'}[t.recording] || t.recording;
+  const load = t.mode === 'ramp'
+    ? `ramp to ${t.target_calls} calls, hold ${Math.round(t.hold_ns / 1e9)}s`
+    : `rolling ${Math.round(t.call_duration_ns / 1e9)}s calls at ${t.rolling_cps.join(' / ')} calls/s`;
+  return {codec, rec, load};
+}
+
+function renderProfileTests() {
+  const p = monProfiles.find(x => x.name === document.getElementById('mon-profile').value);
+  const table = document.getElementById('mon-profile-tests');
+  if (!p) { table.innerHTML = ''; return; }
+  table.innerHTML = '<tr><th>#</th><th>Test</th><th>Calls</th><th>Codec</th><th>Recording</th></tr>' +
+    p.tests.map((t, i) => { const d = describeTest(t); return `<tr><td>${i + 1}</td><td>${esc(t.id)}</td><td>${esc(d.load)}</td><td>${esc(d.codec)}</td><td>${esc(d.rec)}</td></tr>`; }).join('');
+}
+
+async function startTestRun() {
+  const btn = document.getElementById('mon-start-btn');
+  const profile = document.getElementById('mon-profile').value;
+  const p = monProfiles.find(x => x.name === profile);
+  if (!confirm(`Start the ${profile} test script? It takes about ${p ? p.estimate_min : '?'} minutes, places real call load on both PBXware instances, and pauses manual dialing until it finishes.`)) return;
+  btn.disabled = true;
+  const statusEl = document.getElementById('mon-start-status');
+  statusEl.textContent = 'Starting...';
+  statusEl.className = 'status-line';
+  try {
+    await api('/api/testrun/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({profile})});
+    statusEl.textContent = '';
+    refreshMonitoring(false);
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+    btn.disabled = false;
+  }
+}
+
+async function cancelTestRun() {
+  if (!confirm('Cancel the test run? The current test\'s calls are hung up and no further tests run.')) return;
+  await api('/api/testrun/cancel', {method: 'POST'}).catch(() => {});
+  refreshMonitoring(false);
+}
+
+function renderRun(st, ready) {
+  const running = !!st.running;
+  document.getElementById('mon-start-btn').disabled = running || !ready;
+  document.getElementById('mon-cancel-btn').classList.toggle('hidden', !running);
+  document.getElementById('mon-profile').disabled = running;
+  const panel = document.getElementById('mon-run-panel');
+  if (!st.started_at) { panel.classList.add('hidden'); return; }
+  panel.classList.remove('hidden');
+
+  const started = new Date(st.started_at);
+  const mins = Math.round((Date.now() - started) / 60000);
+  document.getElementById('mon-run-title').textContent = `Run: ${st.profile}` + (running ? ' (running)' : (st.done ? ' (finished)' : ''));
+  document.getElementById('mon-run-line').textContent = running
+    ? `Test ${st.test_index} of ${st.test_count}: ${st.test_id}, ${PHASES[st.phase] || st.phase || ''}. Started ${started.toLocaleTimeString()} (${mins} min ago). ${st.message || ''}`
+    : `Started ${started.toLocaleString()}.` + (st.error ? ' Error: ' + st.error : '');
+
+  const s = running ? st.latest : null;
+  const tiles = document.getElementById('mon-tiles');
+  if (s) {
+    const vps = s.vps || {};
+    const t = [
+      ['Calls at once', s.concurrent_calls], ['Host CPU', fmt1(s.host.cpu_pct) + '%'], ['Host memory', fmt1(s.host.mem_pct) + '%'],
+      ['MT VPS CPU', fmt1(vps.MT && vps.MT.cpu_pct) + '%'], ['CC VPS CPU', fmt1(vps.CC && vps.CC.cpu_pct) + '%'],
+      ['MT Asterisk CPU', fmt1(vps.MT && vps.MT.asterisk_cpu_pct) + '%'], ['CC Asterisk CPU', fmt1(vps.CC && vps.CC.asterisk_cpu_pct) + '%'],
+      ['SwarmDialer CPU', fmt1(s.swarmdialer.cpu_pct) + '%'], ['Setup p95', s.setup_p95_ms + ' ms'],
+      ['Answered / failed', `${s.answered} / ${s.failed}`],
+    ];
+    if (s.ramdisk_est_mb) t.push(['RAM disk (est.)', fmt1(s.ramdisk_est_mb) + ' MB']);
+    if (s.cps) t.push(['Dial rate', s.cps + ' calls/s']);
+    tiles.innerHTML = t.map(([k, v]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`).join('');
+  } else {
+    tiles.innerHTML = '';
+  }
+  document.querySelector('.mon-charts').classList.toggle('hidden', !running);
+  const samples = st.current_samples || [];
+  drawLineChart('mon-chart-cpu', samples, x => x.host.cpu_pct, 100, '%');
+  drawLineChart('mon-chart-calls', samples, x => x.concurrent_calls, null, '');
+
+  const results = st.results || [];
+  const table = document.getElementById('mon-results');
+  table.innerHTML = results.length === 0 ? '<tr><td>No tests finished yet.</td></tr>' :
+    '<tr><th>Test</th><th>Result</th><th>Max calls</th><th>Answered / failed</th><th>Setup avg / p95</th><th>Host CPU at load</th><th>Asterisk CPU MT / CC</th><th>RTP recv</th><th>Quality dropped at</th><th>MP3 delay avg (MT / CC)</th><th>RAM disk full (est.)</th></tr>' +
+    results.map(r => {
+      const al = r.at_load || {}; const ast = al.asterisk_cpu_pct || {};
+      const rec = r.recording;
+      const mp3 = rec && rec.mp3_conversion_delay_s ? `${fmt1(rec.mp3_conversion_delay_s.MT && rec.mp3_conversion_delay_s.MT.avg)}s / ${fmt1(rec.mp3_conversion_delay_s.CC && rec.mp3_conversion_delay_s.CC.avg)}s` : '–';
+      const full = rec && rec.ramdisk_full_estimated_at_calls ? `at ${rec.ramdisk_full_estimated_at_calls} calls` : '–';
+      const reason = (STOP_REASONS[r.stop_reason] || r.stop_reason) + (r.stop_detail ? ` (${r.stop_detail})` : '');
+      return `<tr><td>${esc(r.test.id)}</td><td>${esc(reason)}</td><td>${r.max_concurrent_calls}</td><td>${r.calls.answered} / ${r.calls.failed}</td>` +
+        `<td>${fmt1(r.setup_ms.avg)} / ${fmt1(r.setup_ms.p95)} ms</td><td>${fmt1(al.host_cpu_pct)}%</td><td>${fmt1(ast.MT)}% / ${fmt1(ast.CC)}%</td>` +
+        `<td>${Math.round((r.rtp_received_ratio || 0) * 100)}%</td><td>${r.quality_degraded_at_calls ? r.quality_degraded_at_calls + ' calls' : '–'}</td><td>${esc(mp3)}</td><td>${esc(full)}</td></tr>`;
+    }).join('');
+
+  const log = document.getElementById('mon-log');
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
+  log.textContent = (st.log || []).join('\n');
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+// drawLineChart draws one series into an SVG (viewBox 600x160), with a
+// hover readout. yMax null = scale to the data.
+function drawLineChart(id, samples, value, yMax, unit) {
+  const svg = document.getElementById(id);
+  const W = 600, H = 160, L = 34, R = 6, T = 8, B = 16;
+  const vals = samples.map(value).map(v => v || 0);
+  const max = yMax || Math.max(10, ...vals) * 1.1;
+  const x = i => L + (vals.length < 2 ? 0 : i * (W - L - R) / (vals.length - 1));
+  const y = v => T + (H - T - B) * (1 - v / max);
+  let g = '';
+  [0, 0.5, 1].forEach(f => {
+    const v = max * f;
+    g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis-label" x="2" y="${y(v) + 4}">${Math.round(v)}</text>`;
+  });
+  const path = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  svg.innerHTML = g + (vals.length ? `<path class="line" d="${path}"/>` : '') + '<g class="hover"></g>';
+  svg.onmousemove = (ev) => {
+    if (!vals.length) return;
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) * W / r.width;
+    const i = Math.max(0, Math.min(vals.length - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, vals.length - 1)))));
+    const t = new Date(samples[i].t).toLocaleTimeString();
+    svg.querySelector('.hover').innerHTML = `<line class="cursor" x1="${x(i)}" x2="${x(i)}" y1="${T}" y2="${H - B}"/>` +
+      `<text class="readout" x="${Math.min(x(i) + 6, W - 150)}" y="${T + 12}">${t}  ${fmt1(vals[i])}${unit}</text>`;
+  };
+  svg.onmouseleave = () => { const h = svg.querySelector('.hover'); if (h) h.innerHTML = ''; };
+}
+
+let wipeDismissedFor = null;
+
+function renderReport(rep, st) {
+  const box = document.getElementById('mon-report');
+  if (!rep || !rep.state || (st && st.running)) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  const labels = {none: 'No report', saved: 'Saved locally', uploading: 'Uploading', uploaded: 'Uploaded', failed: 'Upload failed'};
+  document.getElementById('mon-report-line').textContent =
+    `${labels[rep.state] || rep.state}` + (rep.report_id ? ` (report ${rep.report_id})` : '') + (rep.message ? `: ${rep.message}` : '');
+  const canRetry = rep.report_id && rep.profile === 'standard' && (rep.state === 'failed' || rep.state === 'saved');
+  document.getElementById('mon-report-retry').classList.toggle('hidden', !canRetry);
+  document.getElementById('mon-wipe').classList.toggle('hidden', !(rep.state === 'uploaded' && wipeDismissedFor !== rep.report_id));
+}
+
+async function retryReportUpload() {
+  try {
+    await api('/api/testrun/report/upload', {method: 'POST'});
+  } catch (e) {
+    alert('Retry failed: ' + e.message);
+  }
+  refreshMonitoring(false);
+}
+
+function dismissWipe() {
+  const line = document.getElementById('mon-report-line').textContent;
+  const m = line.match(/report ([0-9a-f-]{36})/);
+  wipeDismissedFor = m ? m[1] : 'dismissed';
+  document.getElementById('mon-wipe').classList.add('hidden');
+}
+
+async function finishAndWipe() {
+  if (!confirm('Delete SwarmDialer\'s configuration and all stored keys now? This cannot be undone.')) return;
+  try {
+    await api('/api/settings/finish-wipe', {method: 'POST'});
+    alert('Wiped. SwarmDialer is restarting; run the Setup Wizard again to test another host.');
+    setTimeout(() => location.reload(), 3000);
+  } catch (e) {
+    alert('Wipe failed: ' + e.message);
+  }
+}

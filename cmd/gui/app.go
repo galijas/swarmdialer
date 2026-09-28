@@ -17,6 +17,7 @@ import (
 	"swarmdialer/internal/orchestrator"
 	"swarmdialer/internal/statusapi"
 	"swarmdialer/internal/store"
+	"swarmdialer/internal/testrun"
 	"swarmdialer/internal/wizard"
 )
 
@@ -41,6 +42,7 @@ type app struct {
 	provisionJobs  map[string]*wizard.ProvisionProgress
 	connectJobs    map[string]*wizard.ConnectProgress
 	resetJobs      map[string]*wizard.ResetProgress
+	serverwareJobs map[string]*wizard.ServerwareProgress
 	localSessions  map[string]*orchestrator.Session // server ID -> session
 	remoteSessions map[string]*orchestrator.Session // "callerID|calleeID" -> session
 	// pendingSessions holds a channel per session key ("local:<id>" /
@@ -55,6 +57,9 @@ type app struct {
 	regMu         sync.Mutex
 	registrations map[string]*registrationStatus // see registration.go
 	nextRegID     uint64
+
+	testRunner *testrun.Runner // current or last test script run (guarded by mu)
+	reports    reportTracker   // the last run's report and its upload
 
 	// trunkMu guards remoteBatches (see prepareRemoteBatch).
 	trunkMu       sync.Mutex
@@ -78,6 +83,7 @@ func newApp(ctx context.Context, configPath string) (*app, error) {
 		provisionJobs:   make(map[string]*wizard.ProvisionProgress),
 		connectJobs:     make(map[string]*wizard.ConnectProgress),
 		resetJobs:       make(map[string]*wizard.ResetProgress),
+		serverwareJobs:  make(map[string]*wizard.ServerwareProgress),
 		localSessions:   make(map[string]*orchestrator.Session),
 		remoteSessions:  make(map[string]*orchestrator.Session),
 		pendingSessions: make(map[string]chan struct{}),
@@ -116,6 +122,19 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/wizard/provision/status", a.handleProvisionStatus)
 	mux.HandleFunc("/api/wizard/connect", a.handleConnect)
 	mux.HandleFunc("/api/wizard/connect/status", a.handleConnectStatus)
+	mux.HandleFunc("/api/wizard/serverware", a.handleServerwareConnect)
+	mux.HandleFunc("/api/wizard/serverware/status", a.handleServerwareStatus)
+	mux.HandleFunc("/api/serverware", a.handleServerware)
+	mux.HandleFunc("/api/dtcollector", a.handleDTCollector)
+	mux.HandleFunc("/api/testrun/start", a.handleTestRunStart)
+	mux.HandleFunc("/api/testrun/status", a.handleTestRunStatus)
+	mux.HandleFunc("/api/testrun/cancel", a.handleTestRunCancel)
+	mux.HandleFunc("/api/testrun/results", a.handleTestRunResults)
+	mux.HandleFunc("/api/testrun/profiles", a.handleTestRunProfiles)
+	mux.HandleFunc("/api/testrun/readiness", a.handleTestRunReadiness)
+	mux.HandleFunc("/api/testrun/report", a.handleReportStatus)
+	mux.HandleFunc("/api/testrun/report/upload", a.handleReportUpload)
+	mux.HandleFunc("/api/settings/finish-wipe", a.handleFinishWipe)
 	mux.HandleFunc("/api/servers", a.handleServers)
 	mux.HandleFunc("/api/dial", a.handleDial)
 	mux.HandleFunc("/api/stop", a.handleStop)

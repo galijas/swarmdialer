@@ -16,7 +16,9 @@
   <nav class="tabs">
     <button id="tab-btn-wizard" class="active" onclick="showTab('wizard')">Setup Wizard</button>
     <button id="tab-btn-dashboard" onclick="showTab('dashboard')">Dashboard</button>
+    <button id="tab-btn-monitoring" onclick="showTab('monitoring')">SERVERware Monitoring</button>
     <button id="tab-btn-settings" onclick="showTab('settings')">Settings</button>
+    <button class="logout" onclick="logout()">Log out</button>
   </nav>
 </header>
 
@@ -102,7 +104,26 @@
     <button class="btn" id="ct-create-btn" onclick="connectServers()">Create Trunk &amp; DIDs</button>
     <div class="progress-bar hidden" id="ct-progress-bar"><div style="width:0%"></div></div>
     <div class="status-line" id="ct-status"></div>
-    <button class="btn hidden" id="ct-complete-btn" onclick="finishWizard()">Complete Setup</button>
+    <button class="btn hidden" id="ct-complete-btn" onclick="showStep('step-serverware')">Next: Connect SERVERware</button>
+  </div>
+
+  <!-- Step 7: SERVERware site (host monitoring) + DT Collector -->
+  <div class="panel hidden" id="step-serverware">
+    <h2>Step 7: Connect SERVERware</h2>
+    <p class="status-line">Connects the SERVERware site that SwarmDialer and both PBXware instances run on, so the test script can monitor the host. All three VPSs must be on the same host. SwarmDialer turns on Observability and Collect Metrics for the PBXware VPSs.</p>
+    <div class="form-grid">
+      <div class="form-row"><label for="sw-controller">SERVERware controller IP or URL</label><input id="sw-controller" placeholder="10.1.101.10"></div>
+      <div class="form-row"><label for="sw-key">SERVERware admin API key</label><input id="sw-key" type="password" autocomplete="off"></div>
+      <div class="form-row"><label for="sw-dt-url">DT Collector URL</label><input id="sw-dt-url" placeholder="https://dtcollector.dtbicom.xyz"></div>
+      <div class="form-row"><label for="sw-dt-key">DT Collector upload key (can also be set later in Settings)</label><input id="sw-dt-key" type="password" autocomplete="off"></div>
+    </div>
+    <div class="increment-row">
+      <button class="btn" id="sw-connect-btn" onclick="connectServerware()">Connect SERVERware</button>
+      <button class="btn secondary" id="sw-skip-btn" onclick="finishWizard()">Skip for now</button>
+    </div>
+    <ul class="sw-steps" id="sw-steps"></ul>
+    <div class="status-line" id="sw-status"></div>
+    <button class="btn hidden" id="sw-complete-btn" onclick="finishWizard()">Complete Setup</button>
   </div>
 
 </section>
@@ -227,7 +248,73 @@
 </section>
 
 <!-- ============ SETTINGS ============ -->
+<section id="tab-monitoring" class="hidden">
+
+  <div class="panel">
+    <h2>Readiness</h2>
+    <ul class="checklist" id="mon-checks"><li>Loading...</li></ul>
+  </div>
+
+  <div class="panel">
+    <h2>Test Script</h2>
+    <p class="status-line">Runs a fixed sequence of call-load tests on remote calls (MT to CC) while monitoring the SERVERware host and the PBXware VPSs. Each test stops early if the host or a VPS is saturated. Manual dialing is paused while the script runs.</p>
+    <div class="form-grid">
+      <div class="form-row"><label for="mon-profile">Profile</label><select id="mon-profile" onchange="renderProfileTests()"></select></div>
+    </div>
+    <table class="mon-table" id="mon-profile-tests"></table>
+    <div class="increment-row">
+      <button class="btn" id="mon-start-btn" onclick="startTestRun()" disabled>Start Test Script</button>
+      <button class="btn danger hidden" id="mon-cancel-btn" onclick="cancelTestRun()">Cancel Run</button>
+    </div>
+    <div class="status-line" id="mon-start-status"></div>
+  </div>
+
+  <div class="panel hidden" id="mon-run-panel">
+    <h2 id="mon-run-title">Run</h2>
+    <p class="status-line" id="mon-run-line"></p>
+    <div class="tiles" id="mon-tiles"></div>
+    <div class="mon-charts">
+      <figure class="mon-chart"><figcaption>Host CPU (%)</figcaption><svg id="mon-chart-cpu" viewBox="0 0 600 160" preserveAspectRatio="none"></svg></figure>
+      <figure class="mon-chart"><figcaption>Calls at once</figcaption><svg id="mon-chart-calls" viewBox="0 0 600 160" preserveAspectRatio="none"></svg></figure>
+    </div>
+    <h3 class="mon-sub">Results</h3>
+    <div class="table-scroll"><table class="mon-table" id="mon-results"></table></div>
+    <div id="mon-report" class="mon-report hidden">
+      <h3 class="mon-sub">Report</h3>
+      <p class="status-line" id="mon-report-line"></p>
+      <button class="btn secondary hidden" id="mon-report-retry" onclick="retryReportUpload()">Retry upload</button>
+      <div class="wipe-prompt hidden" id="mon-wipe">
+        <p><strong>Finish and wipe?</strong> Deletes SwarmDialer's configuration and every stored key and credential (PBXware and SERVERware API keys, the DT Collector upload key, extension SIP secrets), then restarts. Your login, call logs and saved reports are kept, and nothing on PBXware or SERVERware changes. Choose No to keep testing.</p>
+        <div class="increment-row">
+          <button class="btn danger" onclick="finishAndWipe()">Yes, wipe</button>
+          <button class="btn secondary" onclick="dismissWipe()">No, keep testing</button>
+        </div>
+      </div>
+    </div>
+    <h3 class="mon-sub">Run log</h3>
+    <div class="mon-log" id="mon-log"></div>
+  </div>
+
+</section>
+
 <section id="tab-settings" class="hidden">
+
+  <div class="panel">
+    <h2>DT Collector</h2>
+    <p class="status-line">Where finished standard test reports are uploaded. Create an upload key in DT Collector's interface and enter it here.</p>
+    <div class="form-grid">
+      <div class="form-row"><label for="dt-url">DT Collector URL</label><input id="dt-url"></div>
+      <div class="form-row"><label for="dt-key">Upload key</label><input id="dt-key" type="password" autocomplete="off"></div>
+    </div>
+    <button class="btn secondary" id="dt-save-btn" onclick="saveDTCollector()">Save</button>
+    <div class="status-line" id="dt-status"></div>
+  </div>
+
+  <div class="panel">
+    <h2>SERVERware</h2>
+    <p class="status-line" id="sw-settings-status">Loading...</p>
+    <button class="btn secondary" id="sw-settings-btn" onclick="showTab('wizard'); showStep('step-serverware')">Connect SERVERware</button>
+  </div>
 
   <div class="panel">
     <h2>Reset Instances</h2>

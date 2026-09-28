@@ -55,7 +55,7 @@ log "build complete: $BIN_DIR/gui (the main GUI server), plus provisioning/loadt
 # logged, and nothing brought it back until a manual restart).
 UNIT=/etc/systemd/system/swarmdialer.service
 INSTALL_ROOT="$(pwd)"
-log "installing systemd service (listening on :80) at $UNIT"
+log "installing systemd service (HTTPS on :443, HTTP :80 redirects to it) at $UNIT"
 cat > "$UNIT" <<EOF
 [Unit]
 Description=SwarmDialer GUI
@@ -63,13 +63,31 @@ After=network.target
 
 [Service]
 WorkingDirectory=$INSTALL_ROOT
-ExecStart=$INSTALL_ROOT/bin/gui -addr :80 -config $INSTALL_ROOT/swarmdialer_config.json
+ExecStart=$INSTALL_ROOT/bin/gui -addr :443 -http-redirect-addr :80 -config $INSTALL_ROOT/swarmdialer_config.json -tls-dir $INSTALL_ROOT/tls
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
+# --- Admin login. The GUI holds admin API keys for the PBXware instances
+# (and SERVERware), so it always requires a login. Create the admin
+# password on first install and show it once; it's stored only as a hash.
+CREDS=""
+if [ ! -f "$INSTALL_ROOT/swarmdialer_auth.json" ]; then
+  CREDS=$("$BIN_DIR/gui" -reset-password -config "$INSTALL_ROOT/swarmdialer_config.json")
+fi
+# Secrets on disk (API keys, password hash, TLS key) are root-only.
+chmod 600 "$INSTALL_ROOT"/swarmdialer_config.json "$INSTALL_ROOT"/swarmdialer_auth.json 2>/dev/null || true
+
 systemctl daemon-reload
 systemctl enable --now swarmdialer
+systemctl restart swarmdialer
 log "service started and enabled on boot — check with: systemctl status swarmdialer"
+log "open https://<this server's IP>/ (the certificate is self-signed, so the browser shows a one-time warning)"
+if [ -n "$CREDS" ]; then
+  echo
+  echo "$CREDS" | head -3
+  echo
+  log "save this password now; it is not shown again (to create a new one: $BIN_DIR/gui -reset-password -config $INSTALL_ROOT/swarmdialer_config.json)"
+fi

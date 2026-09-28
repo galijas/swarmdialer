@@ -215,6 +215,8 @@ type CallInfo struct {
 	StartedAt time.Time `json:"started_at"`
 	RTPSent   uint64    `json:"rtp_sent"`
 	RTPRecv   uint64    `json:"rtp_recv"`
+	// SetupMS is how long the call took to be answered (INVITE to 200 OK).
+	SetupMS int64 `json:"setup_ms"`
 }
 
 // SessionSnapshot is a point-in-time, serializable view of a Session's
@@ -362,6 +364,13 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 // per-batch MOS/latency aggregates and a log file, then report a summary
 // back via LogBatchQuality.
 func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, sendMedia bool, codec sipua.Codec, onBatchDone func([]CallRecord)) (started int) {
+	return s.AddCallsWithCallee(n, callDuration, rampInterval, sendMedia, codec, codec, onBatchDone)
+}
+
+// AddCallsWithCallee is AddCalls with a separate codec for the answering
+// side: the callee answers with calleeCodec when PBXware offers it, so a
+// caller/callee pair like opus/ulaw makes PBXware transcode every call.
+func (s *Session) AddCallsWithCallee(n int, callDuration, rampInterval time.Duration, sendMedia bool, codec, calleeCodec sipua.Codec, onBatchDone func([]CallRecord)) (started int) {
 	pairs := s.reservePairs(n)
 	if len(pairs) == 0 {
 		return 0
@@ -393,7 +402,7 @@ func (s *Session) AddCalls(n int, callDuration, rampInterval time.Duration, send
 				batchFailed.Add(1)
 				return
 			}
-			rec := s.runCall(caller, callee, callDuration, sendMedia, stopCh, codec)
+			rec := s.runCall(caller, callee, callDuration, sendMedia, stopCh, codec, calleeCodec)
 			recordsMu.Lock()
 			records = append(records, rec)
 			recordsMu.Unlock()
@@ -512,7 +521,7 @@ func (s *Session) release(caller, callee string) {
 // via ctx cancellation, or via stopCh being closed by Stop), returning a
 // full record of what happened (for the caller's batch-completion tally
 // and MOS/latency/log reporting — see AddCalls).
-func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool, stopCh <-chan struct{}, codec sipua.Codec) CallRecord {
+func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duration, sendMedia bool, stopCh <-chan struct{}, codec, calleeCodec sipua.Codec) CallRecord {
 	s.mu.Lock()
 	caller := s.callerPool.phones[callerAOR]
 	dialDestination, sipDomain := s.callerPool.dialDestination, s.callerPool.sipDomain
@@ -525,10 +534,11 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	startedAt := time.Now()
 	s.logEvent("dialing", callerAOR, calleeAOR, "")
 	dialStart := time.Now()
-	// The callee answers with this call's codec if PBXware offers it (see
-	// sipua.Phone.SetPreferredCodec); the pool reserved it for this call only.
+	// The callee answers with its codec (normally the call's own) if
+	// PBXware offers it (see sipua.Phone.SetPreferredCodec); the pool
+	// reserved it for this call only.
 	if callee := s.calleePool.phones[calleeAOR]; callee != nil {
-		callee.SetPreferredCodec(codec)
+		callee.SetPreferredCodec(calleeCodec)
 	}
 	call, err := caller.Dial(s.ctx, s.dialTimeout, dialDestination, sipDomain, dialNumber, sendMedia, codec)
 	setupLatency := time.Since(dialStart) // INVITE-to-200-OK wall-clock time, win or lose — see CallRecord's doc comment
@@ -606,6 +616,7 @@ func (s *Session) Snapshot() SessionSnapshot {
 			StartedAt: ac.startedAt,
 			RTPSent:   sent,
 			RTPRecv:   recv,
+			SetupMS:   ac.setupLatency.Milliseconds(),
 		})
 	}
 

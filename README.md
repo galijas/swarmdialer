@@ -44,15 +44,46 @@ optionally have it delete the resources it created later.
    sudo ./install.sh
    ```
 
-3. **Open `http://<server-ip>/`** in a browser and complete the Setup
-   Wizard: connect to your PBXware instance (base URL + API key),
-   provision a tenant and test extensions, and optionally connect a
-   second PBXware instance for cross-server (trunk/DID) testing. Once
-   configured, the page opens straight to the Dashboard on every later
-   visit - reconfigure at any time from there.
+3. **Save the admin password** the install script prints at the end
+   (username `admin`). It's shown only once and stored as a hash. To
+   create a new one later:
 
-Configuration (which servers are connected, what was provisioned) is
-persisted to `swarmdialer_config.json` in the working directory, and is
-specific to this deployment - nothing here is meant to be copied between
-environments. Set `-config <path>` to change where it's stored.
+   ```
+   ./bin/gui -reset-password -config /root/swarmdialer/swarmdialer_config.json
+   systemctl restart swarmdialer
+   ```
 
+4. **Open `https://<server-ip>/`** in a browser (plain `http://`
+   redirects there) and log in. The certificate is self-signed, so the
+   browser shows a one-time warning. Then complete the Setup Wizard:
+   connect your PBXware instances (base URL, legacy API key and API v2
+   key for each), provision a tenant and test extensions, connect the two
+   instances with a trunk and DIDs, and connect the SERVERware site they
+   run on (controller address and an admin API key).
+
+## SERVERware host testing
+
+The **SERVERware Monitoring** tab runs a fixed, versioned test script
+(profile "standard") of call-load tests on remote calls between the two
+PBXware instances, while monitoring the SERVERware host and the PBXware
+VPSs through SERVERware's Prometheus. SwarmDialer and both PBXware VPSs
+must run on the same SERVERware host; the wizard checks this and turns on
+SERVERware observability and per-VPS metrics itself.
+
+When a run completes, a report (hardware details and results only, no IPs,
+host names or secrets) is saved under `reports/` and uploaded to DT
+Collector, the central report server (`https://dtcollector.dtbicom.xyz`
+by default; the URL and the upload key are set in Settings). A "smoke"
+profile of a few minutes is available for checking the setup; its
+reports are never uploaded.
+
+## Configuration and security
+
+Configuration (which servers are connected, what was provisioned, API
+keys) is persisted to `swarmdialer_config.json` in the working directory,
+readable only by root, and is specific to this deployment - nothing here
+is meant to be copied between environments. Set `-config <path>` to
+change where it's stored. The admin password hash
+(`swarmdialer_auth.json`) and the TLS certificate (`tls/`) live next to
+it. After a test is finished and uploaded, the Monitoring tab offers
+"Finish and wipe", which deletes the configuration and every stored key.

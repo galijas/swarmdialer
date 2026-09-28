@@ -285,3 +285,84 @@ func toFloat(v any) (float64, error) {
 		return 0, fmt.Errorf("unexpected type %T for float value", v)
 	}
 }
+
+// RecordingCDR is one call's CDR as far as call recording is concerned.
+type RecordingCDR struct {
+	UniqueID  string // also the recording's file name (<uniqueid>.mp3)
+	StartUnix int64
+	Duration  int  // seconds
+	Available bool // true once PBXware has finished the recording file (MP3)
+}
+
+// RecordingCDRsSince returns the CDRs of calls that started at or after
+// since, with each call's "Recording Available" flag. That flag stays
+// false until PBXware has converted the recording to MP3 (confirmed live
+// 2026-09-28), so polling this measures the MP3 conversion delay.
+//
+// It doesn't use the API's time-of-day filter: the two editions apply it
+// differently (the Multi-Tenant test instance applied the "timezone"
+// argument to the filter, the Call Centre one ignored it and filtered in
+// its own local time), so a server's timezone would have to be known.
+// Instead it asks for a date range wide enough for any timezone and reads
+// pages newest first (the order PBXware returns them in), stopping at the
+// first call older than since. Columns are located by the response's
+// header, which differs between editions.
+func (c *Client) RecordingCDRsSince(serverID int, since time.Time) ([]RecordingCDR, error) {
+	from := since.Add(-24 * time.Hour).UTC().Format("Jan-02-2006")
+	to := time.Now().Add(24 * time.Hour).UTC().Format("Jan-02-2006")
+	var out []RecordingCDR
+	for page := 1; ; page++ {
+		params := url.Values{
+			"start": {from}, "starttime": {"00:00:00"}, "end": {to}, "endtime": {"23:59:59"},
+			"limit": {"1000"}, "page": {strconv.Itoa(page)},
+		}
+		if serverID != 0 {
+			params.Set("server", strconv.Itoa(serverID))
+		}
+		body, err := c.call("pbxware.cdr.download", params)
+		if err != nil {
+			return nil, fmt.Errorf("downloading CDRs: %w", err)
+		}
+		rows, _ := body["csv"].([]any)
+		if len(rows) == 0 {
+			break
+		}
+		col := map[string]int{}
+		if hdr, ok := body["header"].([]any); ok {
+			for i, h := range hdr {
+				if name, ok := h.(string); ok {
+					col[name] = i
+				}
+			}
+		}
+		iID, ok1 := col["Unique ID"]
+		iStart, ok2 := col["Date/Time"]
+		iDur, ok3 := col["Total Duration"]
+		iAvail, ok4 := col["Recording Available"]
+		if !(ok1 && ok2 && ok3 && ok4) {
+			return nil, fmt.Errorf("CDR response is missing expected columns (header: %v)", body["header"])
+		}
+		reachedOlder := false
+		for _, r := range rows {
+			row, ok := r.([]any)
+			if !ok || len(row) <= iAvail {
+				continue
+			}
+			str := func(i int) string { v, _ := row[i].(string); return v }
+			start, _ := strconv.ParseInt(str(iStart), 10, 64)
+			if start < since.Unix() {
+				reachedOlder = true
+				continue
+			}
+			dur, _ := strconv.Atoi(str(iDur))
+			out = append(out, RecordingCDR{
+				UniqueID: str(iID), StartUnix: start, Duration: dur,
+				Available: strings.EqualFold(str(iAvail), "true"),
+			})
+		}
+		if next, _ := body["next_page"].(bool); !next || reachedOlder {
+			break
+		}
+	}
+	return out, nil
+}

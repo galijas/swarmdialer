@@ -20,3 +20,13 @@ swarmdialer_config*.json
 # not part of the repo, same reasoning as swarmdialer_config*.json above.
 /logs/
 
+
+# Admin login hash and the GUI TLS certificate/key (per deployment, secret)
+swarmdialer_auth.json
+swarmdialer_auth.json.tmp
+tls/
+
+# Test script run results (per deployment)
+/runs/
+# Local copies of test reports (per deployment)
+/reports/
