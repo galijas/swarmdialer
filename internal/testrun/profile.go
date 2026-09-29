@@ -114,6 +114,12 @@ var Smoke = Profile{
 	},
 }
 
+// Hardware is the profile of a hardware-only report ("Upload Hardware
+// Info Only"): the tested host's hardware and environment, with no tests.
+// It isn't runnable (not in Profiles) and its reports are never compared
+// with benchmark runs.
+var Hardware = Profile{Name: "hardware", Version: 1}
+
 // Profiles by name.
 var Profiles = map[string]Profile{Standard.Name: Standard, Smoke.Name: Smoke}
 

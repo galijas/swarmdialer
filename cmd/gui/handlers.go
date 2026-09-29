@@ -212,7 +212,100 @@ func (a *app) handleServers(w http.ResponseWriter, r *http.Request) {
 			TrunkID: s.TrunkID, PeerServerID: s.PeerServerID, DIDCount: len(s.DIDs),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"servers": views})
+	writeJSON(w, http.StatusOK, map[string]any{"servers": views, "wizard_completed": a.store.WizardCompleted()})
+}
+
+// handleWizardComplete marks the Setup Wizard finished (POST, from its
+// "Complete Setup"/"Skip" buttons) or unfinished again (POST with
+// {"completed": false}, used by "Add second instance" in Settings).
+func (a *app) handleWizardComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	req := struct {
+		Completed *bool `json:"completed"`
+	}{}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	done := req.Completed == nil || *req.Completed
+	if err := a.store.SetWizardCompleted(done); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"wizard_completed": a.store.WizardCompleted()})
+}
+
+type serverUpdateRequest struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	BaseURL  string `json:"base_url"`
+	APIKey   string `json:"api_key"`    // empty = keep the saved one
+	APIKeyV2 string `json:"api_key_v2"` // empty = keep the saved one
+}
+
+// handleServerUpdate reconfigures a connected PBXware instance from
+// Settings: its display name, base URL and API keys. The new connection
+// details are tested first, and must still reach the same PBXware edition
+// (a different system would not have the tenant, extensions and trunk
+// SwarmDialer provisioned). Its dialing sessions are dropped so the next
+// dial uses the new details.
+func (a *app) handleServerUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req serverUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if a.testRunning() {
+		writeError(w, http.StatusConflict, errors.New("a test run is in progress"))
+		return
+	}
+	srv := a.store.GetServer(req.ID)
+	if srv == nil {
+		writeError(w, http.StatusNotFound, errServerNotFound)
+		return
+	}
+	updated := *srv
+	if n := strings.TrimSpace(req.Name); n != "" {
+		updated.Name = n
+	}
+	if u := normalizeBaseURL(req.BaseURL); u != "" {
+		updated.BaseURL = u
+	}
+	if k := strings.TrimSpace(req.APIKey); k != "" {
+		updated.APIKey = k
+	}
+	if k := strings.TrimSpace(req.APIKeyV2); k != "" {
+		updated.APIKeyV2 = k
+	}
+	result, err := wizard.TestConnection(updated.BaseURL, updated.APIKey, updated.APIKeyV2)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if result.License.Edition != srv.Edition {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("that address is a %s PBXware, but this instance was set up on a %s one; to use a different system, reset this instance and run the Setup Wizard", result.License.Edition, srv.Edition))
+		return
+	}
+	updated.SIPHost = wizard.SIPHostFrom(updated.BaseURL)
+	updated.LocalIP = result.LocalIP
+	if err := a.store.UpdateServer(&updated); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	a.mu.Lock()
+	delete(a.localSessions, srv.ID)
+	for key := range a.remoteSessions {
+		callerID, calleeID, _ := strings.Cut(key, "|")
+		if callerID == srv.ID || calleeID == srv.ID {
+			delete(a.remoteSessions, key)
+		}
+	}
+	a.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
 // --- Dialing ---

@@ -253,6 +253,10 @@ function startSecondServer() {
 }
 
 async function finishWizard() {
+  try {
+    await api('/api/wizard/complete', {method: 'POST'});
+    setWizardVisible(false);
+  } catch (e) { /* the tab just stays; the next visit re-checks */ }
   showTab('dashboard');
 }
 
@@ -313,7 +317,9 @@ async function connectServers() {
 // ---------- Dashboard: server list ----------
 
 async function refreshServerList() {
-  const {servers} = await api('/api/servers');
+  const {servers, wizard_completed} = await api('/api/servers');
+  setWizardVisible(!wizard_completed);
+  document.getElementById('servers-count').textContent = servers.length;
   const list = document.getElementById('server-list');
   list.innerHTML = '';
   servers.forEach(s => {
@@ -830,6 +836,7 @@ async function saveDTCollector() {
 }
 
 async function refreshSettingsTab() {
+  refreshInstances();
   refreshServerwareSettings();
   refreshDTCollectorSettings();
   const {servers} = await api('/api/servers');
@@ -987,36 +994,128 @@ async function waitForRestart(statusEl) {
   statusEl.className = 'status-line error';
 }
 
-// ---------- Init ----------
+// ---------- Wizard tab visibility ----------
 //
-// The wizard is the right landing page only the first time, before any
-// server is configured — every later visit, whoever's setting up the
-// dashboard almost certainly wants the dashboard, not to re-walk the
-// wizard. Reconfiguring is still one click away via the dashboard's
-// "Reconfigure" button.
+// The Setup Wizard is only useful until it's finished: after that its tab
+// is hidden, and instances are reconfigured from Settings. It comes back
+// when no instance is left (e.g. after resetting them all).
+
+function setWizardVisible(visible) {
+  document.getElementById('tab-btn-wizard').classList.toggle('hidden', !visible);
+}
+
 (async function init() {
   try {
-    const {servers} = await api('/api/servers');
-    if (servers.length > 0) showTab('dashboard');
+    const {servers, wizard_completed} = await api('/api/servers');
+    setWizardVisible(!wizard_completed);
+    if (wizard_completed || servers.length > 0) showTab('dashboard');
   } catch (e) {
-    // Can't reach the API — stay on the wizard (the default) rather than
+    // Can't reach the API: stay on the wizard (the default) rather than
     // silently failing somewhere less obvious.
   }
 })();
 
-// ---------- SERVERware Monitoring ----------
+// ---------- Collapsible sections ----------
+
+function toggleSection(name) {
+  document.getElementById(name + '-body').classList.toggle('collapsed');
+  document.getElementById(name + '-header').classList.toggle('expanded');
+}
+
+function setSectionOpen(name, open) {
+  document.getElementById(name + '-body').classList.toggle('collapsed', !open);
+  document.getElementById(name + '-header').classList.toggle('expanded', open);
+}
+
+// ---------- Settings: PBXware instances ----------
+
+async function refreshInstances() {
+  const list = document.getElementById('inst-list');
+  try {
+    const {servers} = await api('/api/servers');
+    list.innerHTML = servers.map(s => `
+      <div class="inst-card" data-id="${esc(s.id)}">
+        <div class="inst-head"><span class="name">${esc(s.name)}</span> <span class="badge">${esc(s.edition)}</span>
+          <span class="meta">tenant ${esc(s.tenant_code || '(system)')} · ${s.extension_count} extensions${s.did_count ? ' · ' + s.did_count + ' DIDs' : ''}${s.peer_server_id ? ' · trunk connected' : ''}</span></div>
+        <div class="form-grid">
+          <div class="form-row"><label>Name</label><input class="inst-name" value="${esc(s.name)}"></div>
+          <div class="form-row"><label>Base URL</label><input class="inst-url" value="${esc(s.base_url)}"></div>
+          <div class="form-row"><label>Legacy API key</label><input class="inst-key" type="password" autocomplete="off" placeholder="saved (leave empty to keep it)"></div>
+          <div class="form-row"><label>API v2 key</label><input class="inst-key2" type="password" autocomplete="off" placeholder="saved (leave empty to keep it)"></div>
+        </div>
+        <button class="btn secondary" onclick="saveInstance(this)">Save</button>
+        <span class="status-line inst-status"></span>
+      </div>`).join('') || '<p class="status-line">No instances connected yet. Run the Setup Wizard.</p>';
+    document.getElementById('inst-add-btn').classList.toggle('hidden', servers.length !== 1);
+  } catch (e) {
+    list.innerHTML = `<p class="status-line error">Error loading instances: ${esc(e.message)}</p>`;
+  }
+}
+
+async function saveInstance(btn) {
+  const card = btn.closest('.inst-card');
+  const statusEl = card.querySelector('.inst-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Testing the connection...';
+  statusEl.className = 'status-line inst-status';
+  try {
+    await api('/api/servers/update', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        id: card.dataset.id,
+        name: card.querySelector('.inst-name').value.trim(),
+        base_url: card.querySelector('.inst-url').value.trim(),
+        api_key: card.querySelector('.inst-key').value.trim(),
+        api_key_v2: card.querySelector('.inst-key2').value.trim(),
+      }),
+    });
+    statusEl.textContent = 'Saved.';
+    refreshInstances();
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error inst-status';
+  }
+  btn.disabled = false;
+}
+
+async function addSecondInstance() {
+  try {
+    await api('/api/wizard/complete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({completed: false})});
+  } catch (e) { /* the wizard still opens */ }
+  setWizardVisible(true);
+  showTab('wizard');
+  startSecondServer();
+}
+
+// ---------- SW Host Benchmark ----------
 
 let monProfiles = [];
 let monTimer = null;
+let lastRunStatus = null;
 
 const PHASES = {baseline: 'Idle baseline', ramp: 'Ramping up', hold: 'Holding at target', rolling: 'Rolling calls', stopping: 'Stopping calls', cooldown: 'Cooldown'};
+const PHASE_ORDER = {ramp: ['baseline', 'ramp', 'hold', 'stopping', 'cooldown'], rolling: ['baseline', 'rolling', 'stopping', 'cooldown']};
 const STOP_REASONS = {
   target_reached: 'Target reached', target_not_reached: 'Target not reached', host_cpu_100: 'Host CPU saturated',
   host_ram_100: 'Host memory full', vps_cpu_limit: 'VPS CPU limit reached', vps_ram_limit: 'VPS memory limit reached',
   swarmdialer_overloaded: 'SwarmDialer overloaded (result invalid)', cancelled: 'Cancelled', error: 'Error',
 };
-const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-const fmt1 = (v) => (v === undefined || v === null) ? '–' : (Math.round(v * 10) / 10).toString();
+// Validated categorical palette on the dark chart surface (dataviz check:
+// all pass). Fixed order, never cycled: host, PBXware instance 1, instance 2.
+const SERIES = [
+  {key: 'host', label: 'SW host', color: ''},
+  {key: 'MT', label: 'PBXware MT VPS', color: ''},
+  {key: 'CC', label: 'PBXware CC VPS', color: ''},
+];
+// Series colours come from the theme (--series-1..3 in style.css), so
+// light and dark mode each use their own validated palette.
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function applySeriesColors() { SERIES.forEach((s, i) => { s.color = cssVar(`--series-${i + 1}`); }); }
+document.addEventListener('themechange', () => {
+  if (!document.getElementById('tab-monitoring').classList.contains('hidden')) renderShowcase();
+});
+function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+const fmt1 = (v) => (v === undefined || v === null || isNaN(v)) ? '–' : (Math.round(v * 10) / 10).toString();
 
 function startMonitoringPolling() {
   refreshMonitoring(true);
@@ -1032,26 +1131,119 @@ async function refreshMonitoring(full) {
       monProfiles = await api('/api/testrun/profiles');
       const sel = document.getElementById('mon-profile');
       const keep = sel.value;
-      sel.innerHTML = monProfiles.map(p => `<option value="${esc(p.name)}">${esc(p.name)} v${p.version} (about ${p.estimate_min} min)</option>`).join('');
+      // Labels as specified: Standard (about N minutes), Smoke v1 (about N minutes).
+      const label = p => p.name === 'standard' ? `Standard (about ${p.estimate_min} minutes)` : `${p.name.charAt(0).toUpperCase() + p.name.slice(1)} v${p.version} (about ${p.estimate_min} minutes)`;
+      sel.innerHTML = monProfiles.map(p => `<option value="${esc(p.name)}">${esc(label(p))}</option>`).join('');
       if (keep) sel.value = keep;
-      renderProfileTests();
     }
     const [ready, st, rep] = await Promise.all([api('/api/testrun/readiness'), api('/api/testrun/status'), api('/api/testrun/report')]);
+    lastRunStatus = st;
     renderReadiness(ready);
-    renderRun(st, ready.ready);
+    renderControls(st, ready.ready);
+    renderShowcase();
     renderReport(rep, st);
+    // The list changes when a run saves a report or its upload state moves.
+    const key = `${rep.report_id || ''}:${rep.state || ''}`;
+    if (full || key !== lastReportKey) { lastReportKey = key; refreshReportList(); }
   } catch (e) {
     document.getElementById('mon-start-status').textContent = 'Error: ' + e.message;
   }
 }
 
+let lastReportKey = null;
+
+// ---------- SW Host Benchmark: previous reports ----------
+
+async function refreshReportList() {
+  const list = document.getElementById('report-list');
+  try {
+    const {reports} = await api('/api/reports');
+    document.getElementById('reports-count').textContent = reports.length;
+    if (!reports.length) {
+      list.innerHTML = '<p class="status-line">No reports yet. A report is saved when a test script run completes.</p>';
+      return;
+    }
+    const states = {saved: 'saved locally', uploading: 'uploading', uploaded: 'uploaded to DT Collector', failed: 'upload failed', none: 'saved locally'};
+    list.innerHTML = reports.map(r => `
+      <div class="log-row">
+        <div class="log-row-info">
+          <div class="log-row-name">${esc(r.profile)} · ${new Date(r.created_at).toLocaleString()}</div>
+          <div class="log-row-meta">${esc(r.cpu_model)} · ${r.tests} tests · ${esc(states[r.upload_state] || r.upload_state)} · ${formatBytes(r.size_bytes)}</div>
+        </div>
+        <div class="log-row-actions">
+          <button class="btn secondary" onclick="viewReport('${esc(r.id)}')">View</button>
+          <button class="btn secondary" onclick="downloadReport('${esc(r.id)}')">Download</button>
+          <button class="btn danger" onclick="deleteReport('${esc(r.id)}')">Delete</button>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    list.innerHTML = `<p class="status-line error">Error loading reports: ${esc(e.message)}</p>`;
+  }
+}
+
+function viewReport(id) {
+  window.open(`/api/reports/view?id=${encodeURIComponent(id)}`, '_blank');
+}
+
+function downloadReport(id) {
+  window.open(`/api/reports/download?id=${encodeURIComponent(id)}`, '_blank');
+}
+
+async function deleteReport(id) {
+  if (!confirm('Delete this report? Only the local copy is deleted; a report already uploaded stays in DT Collector.')) return;
+  try {
+    await api('/api/reports/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})});
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+  refreshReportList();
+}
+
+let readyAutoSet = false;
 function renderReadiness(ready) {
   document.getElementById('mon-checks').innerHTML = ready.checks.map(c => {
     const cls = c.ok ? 'ok' : (c.warn ? 'warn' : 'bad');
     const mark = c.ok ? '✓' : (c.warn ? '⚠' : '✗');
     return `<li><span class="${cls}">${mark}</span> ${esc(c.label)}<span class="note">${esc(c.note)}</span></li>`;
   }).join('');
+  const ok = ready.checks.filter(c => c.ok).length;
+  const badge = document.getElementById('ready-count');
+  badge.textContent = `${ok}/${ready.checks.length} ready`;
+  badge.classList.toggle('badge-warn', ok < ready.checks.length);
+  // Open by default only when something needs attention.
+  if (!readyAutoSet) { setSectionOpen('ready', !ready.ready); readyAutoSet = true; }
 }
+
+function renderControls(st, ready) {
+  const running = !!st.running;
+  document.getElementById('mon-start-btn').disabled = running || !ready;
+  document.getElementById('mon-cancel-btn').classList.toggle('hidden', !running);
+  document.getElementById('mon-profile').disabled = running;
+}
+
+function toggleProfileInfo(ev) {
+  ev.stopPropagation();
+  const pop = document.getElementById('mon-info-pop');
+  const open = pop.classList.contains('hidden');
+  if (open) {
+    const name = document.getElementById('mon-profile').value;
+    pop.innerHTML = PROFILE_INFO[name] || '<p>No description for this profile.</p>';
+  }
+  pop.classList.toggle('hidden', !open);
+  document.getElementById('mon-info-btn').setAttribute('aria-expanded', String(open));
+}
+// Hover shows it too; clicking elsewhere closes a pinned popover.
+document.addEventListener('DOMContentLoaded', () => {
+  const wrap = document.querySelector('.info-wrap');
+  if (!wrap) return;
+  let pinned = false;
+  const pop = document.getElementById('mon-info-pop');
+  const show = () => { pop.innerHTML = PROFILE_INFO[document.getElementById('mon-profile').value] || ''; pop.classList.remove('hidden'); };
+  wrap.addEventListener('mouseenter', () => { if (!pinned) show(); });
+  wrap.addEventListener('mouseleave', () => { if (!pinned) pop.classList.add('hidden'); });
+  document.getElementById('mon-info-btn').addEventListener('click', () => { pinned = !pop.classList.contains('hidden'); });
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) { pinned = false; pop.classList.add('hidden'); } });
+});
 
 function describeTest(t) {
   const codec = t.caller_codec === t.callee_codec ? t.caller_codec : `${t.caller_codec} → ${t.callee_codec} (transcoding)`;
@@ -1059,16 +1251,220 @@ function describeTest(t) {
   const load = t.mode === 'ramp'
     ? `ramp to ${t.target_calls} calls, hold ${Math.round(t.hold_ns / 1e9)}s`
     : `rolling ${Math.round(t.call_duration_ns / 1e9)}s calls at ${t.rolling_cps.join(' / ')} calls/s`;
-  return {codec, rec, load};
+  const title = t.mode === 'rolling'
+    ? `Rolling calls, ${rec}`
+    : `${rec.charAt(0).toUpperCase() + rec.slice(1)}, ${t.caller_codec === t.callee_codec ? 'low-cost codec' : 'high-cost codec'}`;
+  return {codec, rec, load, title};
 }
 
-function renderProfileTests() {
-  const p = monProfiles.find(x => x.name === document.getElementById('mon-profile').value);
-  const table = document.getElementById('mon-profile-tests');
-  if (!p) { table.innerHTML = ''; return; }
-  table.innerHTML = '<tr><th>#</th><th>Test</th><th>Calls</th><th>Codec</th><th>Recording</th></tr>' +
-    p.tests.map((t, i) => { const d = describeTest(t); return `<tr><td>${i + 1}</td><td>${esc(t.id)}</td><td>${esc(d.load)}</td><td>${esc(d.codec)}</td><td>${esc(d.rec)}</td></tr>`; }).join('');
+// renderShowcase draws the progress bar, the step tracker and, while a run
+// is going (or after it), the live figures and whole-run charts.
+function renderShowcase() {
+  const st = lastRunStatus || {};
+  const selected = document.getElementById('mon-profile').value;
+  const runProfile = st.profile ? st.profile.split(' ')[0] : null;
+  // Show the run's own profile once one has started; otherwise the selection.
+  const pname = (st.running || st.done) && runProfile ? runProfile : selected;
+  const p = monProfiles.find(x => x.name === pname);
+  if (!p) return;
+  const running = !!st.running, started = !!st.started_at && runProfile === pname;
+
+  document.getElementById('show-title').textContent = started
+    ? `${pname === 'standard' ? 'Standard' : 'Smoke v1'} benchmark` + (running ? ' (running)' : st.done ? ' (finished)' : '')
+    : `${pname === 'standard' ? 'Standard' : 'Smoke v1'} benchmark (not started)`;
+
+  // Overall progress: elapsed against the profile's estimate.
+  const fill = document.getElementById('run-progress-fill');
+  const text = document.getElementById('run-progress-text');
+  if (started) {
+    const elapsed = ((st.done && st.timeline && st.timeline.length ? st.timeline[st.timeline.length - 1].t * 1000 : Date.now()) - new Date(st.started_at)) / 1000;
+    const est = st.estimated_sec || p.estimate_min * 60;
+    const done = st.done ? 1 : Math.min(0.99, elapsed / est);
+    fill.style.width = (done * 100).toFixed(1) + '%';
+    const m = s => `${Math.floor(s / 60)} min`;
+    text.textContent = running
+      ? `Test ${st.test_index} of ${st.test_count} · ${PHASES[st.phase] || st.phase || 'starting'} · ${m(elapsed)} elapsed, about ${m(Math.max(0, est - elapsed))} left`
+      : (st.done ? `Finished after ${m(elapsed)}` + (st.error ? ` · ${st.error}` : '') : '');
+  } else {
+    fill.style.width = '0%';
+    text.textContent = `${p.tests.length} tests · about ${p.estimate_min} minutes`;
+  }
+
+  // Step tracker: finished and future steps greyed, the current one bold.
+  const results = started ? (st.results || []) : [];
+  const cur = running ? st.test_index : 0;
+  document.getElementById('show-steps').innerHTML = p.tests.map((t, i) => {
+    const n = i + 1, d = describeTest(t), r = results[i];
+    const state = n === cur ? 'current' : (r ? 'done' : 'future');
+    let extra = '';
+    if (state === 'current') {
+      const order = PHASE_ORDER[t.mode] || [];
+      const at = order.indexOf(st.phase);
+      extra = `<div class="phases">${order.map((ph, j) => `<span class="phase ${j < at ? 'past' : j === at ? 'now' : ''}">${esc(PHASES[ph])}</span>`).join('<span class="sep">›</span>')}</div>`;
+    } else if (r) {
+      const ok = r.stop_reason === 'target_reached';
+      extra = `<div class="step-result"><span class="${ok ? 'ok' : 'warn'}">${ok ? '✓' : '⚠'}</span> ${esc(STOP_REASONS[r.stop_reason] || r.stop_reason)} · max ${r.max_concurrent_calls} calls` +
+        (r.at_load && r.at_load.host_cpu_pct !== undefined ? ` · host CPU ${fmt1(r.at_load.host_cpu_pct)}%` : '') + '</div>';
+    }
+    return `<li class="step ${state}"><span class="step-num">${state === 'done' ? '✓' : n}</span><div class="step-body">` +
+      `<div class="step-title">${esc(d.title)}</div><div class="step-desc">${esc(d.load)} · ${esc(d.codec)} · ${esc(d.rec)}</div>${extra}</div></li>`;
+  }).join('');
+
+  document.getElementById('show-hero').classList.toggle('hidden', !running || !st.latest);
+  document.getElementById('show-charts').classList.toggle('hidden', !started || !(st.timeline || []).length);
+  document.getElementById('mon-run-panel').classList.toggle('hidden', !started);
+  if (running && st.latest) renderHero(st, p);
+  if (started) {
+    renderCharts(st, p);
+    renderResults(st);
+  }
 }
+
+function renderHero(st, p) {
+  const s = st.latest, vps = s.vps || {};
+  const t = p.tests[st.test_index - 1] || {};
+  const target = t.target_calls || 0;
+  document.getElementById('hero-calls').textContent = s.concurrent_calls;
+  document.getElementById('hero-target').textContent = target ? ` / ${target}` : '';
+  document.getElementById('hero-calls-bar').style.width = target ? Math.min(100, 100 * s.concurrent_calls / target) + '%' : '0%';
+  const cpus = st.host_cpus || 1;
+  const g = [
+    ['Host CPU', s.host.cpu_pct, '%', 100],
+    ['Host memory', s.host.mem_pct, '%', 100],
+    ['MT VPS CPU', vps.MT && vps.MT.cpu_pct / cpus, '% of host', 100],
+    ['CC VPS CPU', vps.CC && vps.CC.cpu_pct / cpus, '% of host', 100],
+    ['MT Asterisk', vps.MT && vps.MT.asterisk_cpu_pct, '% of a core', null],
+    ['CC Asterisk', vps.CC && vps.CC.asterisk_cpu_pct, '% of a core', null],
+    ['SwarmDialer CPU', s.swarmdialer.cpu_pct, '%', 100],
+    ['Setup p95', s.setup_p95_ms, 'ms', null],
+    ['Answered / failed', null, `${s.answered} / ${s.failed}`, null],
+    ['Peak calls (run)', st.peak_calls, '', null],
+    ['Peak host CPU (run)', st.peak_host_cpu_pct, '%', 100],
+  ];
+  if (s.ramdisk_est_mb) g.push(['RAM disk (est.)', s.ramdisk_est_mb, 'MB', null]);
+  if (s.cps) g.push(['Dial rate', s.cps, 'calls/s', null]);
+  document.getElementById('show-gauges').innerHTML = g.map(([k, v, unit, max]) => {
+    const val = v === null ? unit : `${fmt1(v)}<span class="u">${esc(unit)}</span>`;
+    const bar = max ? `<div class="meter sm"><div style="width:${Math.min(100, Math.max(0, v || 0))}%"></div></div>` : '';
+    return `<div class="gauge"><div class="gv">${val}</div><div class="gk">${esc(k)}</div>${bar}</div>`;
+  }).join('');
+}
+
+function renderCharts(st, p) {
+  applySeriesColors();
+  const tl = st.timeline || [];
+  const cpus = st.host_cpus || 1, gb = 1024 ** 3;
+  const target = Math.max(...p.tests.map(t => t.target_calls || 0));
+  const legend = (id) => { document.getElementById(id).innerHTML = SERIES.map(s => `<span class="leg"><i style="background:${s.color}"></i>${esc(s.label)}</span>`).join(''); };
+  legend('leg-cpu'); legend('leg-mem');
+  drawTimeline('chart-cpu', tl, [
+    {...SERIES[0], v: x => x.host_cpu},
+    {...SERIES[1], v: x => (x.vps_cpu.MT || 0) / cpus},
+    {...SERIES[2], v: x => (x.vps_cpu.CC || 0) / cpus},
+  ], {max: 100, unit: '%'});
+  drawTimeline('chart-mem', tl, [
+    {...SERIES[0], v: x => (st.host_mem_bytes || 0) * x.host_mem / 100 / gb},
+    {...SERIES[1], v: x => (x.vps_mem.MT || 0) / gb},
+    {...SERIES[2], v: x => (x.vps_mem.CC || 0) / gb},
+  ], {max: st.host_mem_bytes ? st.host_mem_bytes / gb : null, unit: ' GB'});
+  drawTimeline('chart-calls', tl, [{key: 'calls', label: 'Calls at once', color: SERIES[0].color, v: x => x.calls}], {max: Math.max(target, 10), unit: '', target});
+}
+
+// drawTimeline draws a whole-run line chart sized to its container, with
+// test boundaries, direct end labels (>= 2 series), and a hover crosshair
+// listing every series' value.
+function drawTimeline(id, tl, series, opts) {
+  const svg = document.getElementById(id);
+  const plot = svg.parentElement;
+  const W = Math.max(300, plot.clientWidth), H = 190, L = 40, R = series.length > 1 ? 118 : 12, T = 10, B = 22;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', W); svg.setAttribute('height', H);
+  if (!tl.length) { svg.innerHTML = ''; return; }
+  const t0 = tl[0].t, t1 = Math.max(tl[tl.length - 1].t, t0 + 60);
+  let max = opts.max;
+  if (!max) max = Math.max(1, ...tl.flatMap(p => series.map(s => s.v(p) || 0))) * 1.15;
+  const x = t => L + (t - t0) * (W - L - R) / (t1 - t0);
+  const y = v => T + (H - T - B) * (1 - Math.min(v, max) / max);
+  let g = '';
+  [0, 0.5, 1].forEach(f => {
+    const v = max * f;
+    g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis" x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${fmt1(v)}</text>`;
+  });
+  // Test boundaries, labelled with the test number.
+  let prev = null;
+  tl.forEach(pt => {
+    if (pt.test !== prev) {
+      g += `<line class="bound" x1="${x(pt.t)}" x2="${x(pt.t)}" y1="${T}" y2="${H - B}"/><text class="axis" x="${x(pt.t) + 3}" y="${H - 6}">${pt.test}</text>`;
+      prev = pt.test;
+    }
+  });
+  if (opts.target) g += `<line class="target" x1="${L}" x2="${W - R}" y1="${y(opts.target)}" y2="${y(opts.target)}"/><text class="axis" x="${W - R - 4}" y="${y(opts.target) - 4}" text-anchor="end">target ${opts.target}</text>`;
+  series.forEach(s => {
+    const d = tl.map((pt, i) => `${i ? 'L' : 'M'}${x(pt.t).toFixed(1)},${y(s.v(pt) || 0).toFixed(1)}`).join('');
+    g += `<path class="tl" style="stroke:${s.color}" d="${d}"/>`;
+  });
+  // Direct labels at the line ends (text in text ink, a colour dot beside).
+  if (series.length > 1) {
+    const last = tl[tl.length - 1];
+    const ys = series.map(s => ({s, yy: y(s.v(last) || 0)})).sort((a, b) => a.yy - b.yy);
+    for (let i = 1; i < ys.length; i++) if (ys[i].yy - ys[i - 1].yy < 13) ys[i].yy = ys[i - 1].yy + 13;
+    ys.forEach(({s, yy}) => { g += `<circle cx="${W - R + 8}" cy="${yy - 4}" r="4" fill="${s.color}"/><text class="endlbl" x="${W - R + 16}" y="${yy}">${esc(s.label.replace('PBXware ', '').replace(' VPS', ''))} ${fmt1(s.v(last))}${esc(opts.unit)}</text>`; });
+  }
+  g += '<g class="hover"></g>';
+  svg.innerHTML = g;
+  const tip = plot.querySelector('.tip');
+  svg.onmousemove = (ev) => {
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) * W / r.width;
+    const tt = t0 + (px - L) * (t1 - t0) / (W - L - R);
+    let best = 0;
+    tl.forEach((pt, i) => { if (Math.abs(pt.t - tt) < Math.abs(tl[best].t - tt)) best = i; });
+    const pt = tl[best];
+    svg.querySelector('.hover').innerHTML = `<line class="cursor" x1="${x(pt.t)}" x2="${x(pt.t)}" y1="${T}" y2="${H - B}"/>` +
+      series.map(s => `<circle cx="${x(pt.t)}" cy="${y(s.v(pt) || 0)}" r="4" fill="${s.color}" stroke="${cssVar('--panel-alt')}" stroke-width="2"/>`).join('');
+    tip.innerHTML = `<div class="tip-h">${new Date(pt.t * 1000).toLocaleTimeString()} · test ${pt.test} · ${esc(PHASES[pt.phase] || pt.phase)}</div>` +
+      series.map(s => `<div><i style="background:${s.color}"></i>${esc(s.label)}: <b>${fmt1(s.v(pt))}${esc(opts.unit)}</b></div>`).join('');
+    tip.classList.remove('hidden');
+    const left = Math.min(ev.clientX - r.left + 14, r.width - tip.offsetWidth - 4);
+    tip.style.left = Math.max(0, left) + 'px';
+    tip.style.top = '8px';
+  };
+  svg.onmouseleave = () => { svg.querySelector('.hover').innerHTML = ''; tip.classList.add('hidden'); };
+}
+
+function renderResults(st) {
+  const results = st.results || [];
+  document.getElementById('mon-results').innerHTML = results.length === 0 ? '<tr><td>No tests finished yet.</td></tr>' :
+    '<tr><th>Test</th><th>Result</th><th>Max calls</th><th>Answered / failed</th><th>Setup avg / p95</th><th>Host CPU at load</th><th>Asterisk CPU MT / CC</th><th>RTP recv</th><th>MOS avg / min</th><th>Quality dropped at</th><th>MP3 delay avg (MT / CC)</th><th>RAM disk full (est.)</th></tr>' +
+    results.map(r => {
+      const al = r.at_load || {}; const ast = al.asterisk_cpu_pct || {};
+      const rec = r.recording;
+      const mp3 = rec && rec.mp3_conversion_delay_s ? `${fmt1(rec.mp3_conversion_delay_s.MT && rec.mp3_conversion_delay_s.MT.avg)}s / ${fmt1(rec.mp3_conversion_delay_s.CC && rec.mp3_conversion_delay_s.CC.avg)}s` : '–';
+      const full = rec && rec.ramdisk_full_estimated_at_calls ? `at ${rec.ramdisk_full_estimated_at_calls} calls` : '–';
+      const reason = (STOP_REASONS[r.stop_reason] || r.stop_reason) + (r.stop_detail ? ` (${r.stop_detail})` : '');
+      const mos = r.mos && r.mos.n ? `${fmt1(r.mos.avg)} / ${fmt1(r.mos.min)}` : '–';
+      return `<tr><td>${esc(r.test.id)}</td><td>${esc(reason)}</td><td>${r.max_concurrent_calls}</td><td>${r.calls.answered} / ${r.calls.failed}</td>` +
+        `<td>${fmt1(r.setup_ms.avg)} / ${fmt1(r.setup_ms.p95)} ms</td><td>${fmt1(al.host_cpu_pct)}%</td><td>${fmt1(ast.MT)}% / ${fmt1(ast.CC)}%</td>` +
+        `<td>${Math.round((r.rtp_received_ratio || 0) * 100)}%</td><td>${mos}</td><td>${r.quality_degraded_at_calls ? r.quality_degraded_at_calls + ' calls' : '–'}</td><td>${esc(mp3)}</td><td>${esc(full)}</td></tr>`;
+    }).join('');
+  const log = document.getElementById('mon-log');
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
+  log.textContent = (st.log || []).join('\n');
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+// Present: the showcase alone, full screen, for leaving on a screen
+// during a long run.
+function togglePresent() {
+  const el = document.getElementById('mon-show');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (el.requestFullscreen) el.requestFullscreen().then(() => renderShowcase());
+}
+document.addEventListener('fullscreenchange', () => {
+  document.getElementById('show-present-btn').textContent = document.fullscreenElement ? 'Exit' : 'Present';
+  setTimeout(renderShowcase, 50); // charts re-measure their width
+});
+window.addEventListener('resize', () => { if (!document.getElementById('tab-monitoring').classList.contains('hidden')) renderShowcase(); });
 
 async function startTestRun() {
   const btn = document.getElementById('mon-start-btn');
@@ -1091,96 +1487,9 @@ async function startTestRun() {
 }
 
 async function cancelTestRun() {
-  if (!confirm('Cancel the test run? The current test\'s calls are hung up and no further tests run.')) return;
+  if (!confirm("Cancel the test run? The current test's calls are hung up and no further tests run.")) return;
   await api('/api/testrun/cancel', {method: 'POST'}).catch(() => {});
   refreshMonitoring(false);
-}
-
-function renderRun(st, ready) {
-  const running = !!st.running;
-  document.getElementById('mon-start-btn').disabled = running || !ready;
-  document.getElementById('mon-cancel-btn').classList.toggle('hidden', !running);
-  document.getElementById('mon-profile').disabled = running;
-  const panel = document.getElementById('mon-run-panel');
-  if (!st.started_at) { panel.classList.add('hidden'); return; }
-  panel.classList.remove('hidden');
-
-  const started = new Date(st.started_at);
-  const mins = Math.round((Date.now() - started) / 60000);
-  document.getElementById('mon-run-title').textContent = `Run: ${st.profile}` + (running ? ' (running)' : (st.done ? ' (finished)' : ''));
-  document.getElementById('mon-run-line').textContent = running
-    ? `Test ${st.test_index} of ${st.test_count}: ${st.test_id}, ${PHASES[st.phase] || st.phase || ''}. Started ${started.toLocaleTimeString()} (${mins} min ago). ${st.message || ''}`
-    : `Started ${started.toLocaleString()}.` + (st.error ? ' Error: ' + st.error : '');
-
-  const s = running ? st.latest : null;
-  const tiles = document.getElementById('mon-tiles');
-  if (s) {
-    const vps = s.vps || {};
-    const t = [
-      ['Calls at once', s.concurrent_calls], ['Host CPU', fmt1(s.host.cpu_pct) + '%'], ['Host memory', fmt1(s.host.mem_pct) + '%'],
-      ['MT VPS CPU', fmt1(vps.MT && vps.MT.cpu_pct) + '%'], ['CC VPS CPU', fmt1(vps.CC && vps.CC.cpu_pct) + '%'],
-      ['MT Asterisk CPU', fmt1(vps.MT && vps.MT.asterisk_cpu_pct) + '%'], ['CC Asterisk CPU', fmt1(vps.CC && vps.CC.asterisk_cpu_pct) + '%'],
-      ['SwarmDialer CPU', fmt1(s.swarmdialer.cpu_pct) + '%'], ['Setup p95', s.setup_p95_ms + ' ms'],
-      ['Answered / failed', `${s.answered} / ${s.failed}`],
-    ];
-    if (s.ramdisk_est_mb) t.push(['RAM disk (est.)', fmt1(s.ramdisk_est_mb) + ' MB']);
-    if (s.cps) t.push(['Dial rate', s.cps + ' calls/s']);
-    tiles.innerHTML = t.map(([k, v]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`).join('');
-  } else {
-    tiles.innerHTML = '';
-  }
-  document.querySelector('.mon-charts').classList.toggle('hidden', !running);
-  const samples = st.current_samples || [];
-  drawLineChart('mon-chart-cpu', samples, x => x.host.cpu_pct, 100, '%');
-  drawLineChart('mon-chart-calls', samples, x => x.concurrent_calls, null, '');
-
-  const results = st.results || [];
-  const table = document.getElementById('mon-results');
-  table.innerHTML = results.length === 0 ? '<tr><td>No tests finished yet.</td></tr>' :
-    '<tr><th>Test</th><th>Result</th><th>Max calls</th><th>Answered / failed</th><th>Setup avg / p95</th><th>Host CPU at load</th><th>Asterisk CPU MT / CC</th><th>RTP recv</th><th>Quality dropped at</th><th>MP3 delay avg (MT / CC)</th><th>RAM disk full (est.)</th></tr>' +
-    results.map(r => {
-      const al = r.at_load || {}; const ast = al.asterisk_cpu_pct || {};
-      const rec = r.recording;
-      const mp3 = rec && rec.mp3_conversion_delay_s ? `${fmt1(rec.mp3_conversion_delay_s.MT && rec.mp3_conversion_delay_s.MT.avg)}s / ${fmt1(rec.mp3_conversion_delay_s.CC && rec.mp3_conversion_delay_s.CC.avg)}s` : '–';
-      const full = rec && rec.ramdisk_full_estimated_at_calls ? `at ${rec.ramdisk_full_estimated_at_calls} calls` : '–';
-      const reason = (STOP_REASONS[r.stop_reason] || r.stop_reason) + (r.stop_detail ? ` (${r.stop_detail})` : '');
-      return `<tr><td>${esc(r.test.id)}</td><td>${esc(reason)}</td><td>${r.max_concurrent_calls}</td><td>${r.calls.answered} / ${r.calls.failed}</td>` +
-        `<td>${fmt1(r.setup_ms.avg)} / ${fmt1(r.setup_ms.p95)} ms</td><td>${fmt1(al.host_cpu_pct)}%</td><td>${fmt1(ast.MT)}% / ${fmt1(ast.CC)}%</td>` +
-        `<td>${Math.round((r.rtp_received_ratio || 0) * 100)}%</td><td>${r.quality_degraded_at_calls ? r.quality_degraded_at_calls + ' calls' : '–'}</td><td>${esc(mp3)}</td><td>${esc(full)}</td></tr>`;
-    }).join('');
-
-  const log = document.getElementById('mon-log');
-  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 20;
-  log.textContent = (st.log || []).join('\n');
-  if (atBottom) log.scrollTop = log.scrollHeight;
-}
-
-// drawLineChart draws one series into an SVG (viewBox 600x160), with a
-// hover readout. yMax null = scale to the data.
-function drawLineChart(id, samples, value, yMax, unit) {
-  const svg = document.getElementById(id);
-  const W = 600, H = 160, L = 34, R = 6, T = 8, B = 16;
-  const vals = samples.map(value).map(v => v || 0);
-  const max = yMax || Math.max(10, ...vals) * 1.1;
-  const x = i => L + (vals.length < 2 ? 0 : i * (W - L - R) / (vals.length - 1));
-  const y = v => T + (H - T - B) * (1 - v / max);
-  let g = '';
-  [0, 0.5, 1].forEach(f => {
-    const v = max * f;
-    g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text class="axis-label" x="2" y="${y(v) + 4}">${Math.round(v)}</text>`;
-  });
-  const path = vals.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
-  svg.innerHTML = g + (vals.length ? `<path class="line" d="${path}"/>` : '') + '<g class="hover"></g>';
-  svg.onmousemove = (ev) => {
-    if (!vals.length) return;
-    const r = svg.getBoundingClientRect();
-    const px = (ev.clientX - r.left) * W / r.width;
-    const i = Math.max(0, Math.min(vals.length - 1, Math.round((px - L) / ((W - L - R) / Math.max(1, vals.length - 1)))));
-    const t = new Date(samples[i].t).toLocaleTimeString();
-    svg.querySelector('.hover').innerHTML = `<line class="cursor" x1="${x(i)}" x2="${x(i)}" y1="${T}" y2="${H - B}"/>` +
-      `<text class="readout" x="${Math.min(x(i) + 6, W - 150)}" y="${T + 12}">${t}  ${fmt1(vals[i])}${unit}</text>`;
-  };
-  svg.onmouseleave = () => { const h = svg.querySelector('.hover'); if (h) h.innerHTML = ''; };
 }
 
 let wipeDismissedFor = null;
@@ -1195,7 +1504,10 @@ function renderReport(rep, st) {
   const canRetry = rep.report_id && rep.profile === 'standard' && (rep.state === 'failed' || rep.state === 'saved');
   document.getElementById('mon-report-retry').classList.toggle('hidden', !canRetry);
   document.getElementById('mon-wipe').classList.toggle('hidden', !(rep.state === 'uploaded' && wipeDismissedFor !== rep.report_id));
+  if (rep.state === 'uploaded') wipeReportID = rep.report_id;
 }
+
+let wipeReportID = null;
 
 async function retryReportUpload() {
   try {
@@ -1207,14 +1519,12 @@ async function retryReportUpload() {
 }
 
 function dismissWipe() {
-  const line = document.getElementById('mon-report-line').textContent;
-  const m = line.match(/report ([0-9a-f-]{36})/);
-  wipeDismissedFor = m ? m[1] : 'dismissed';
+  wipeDismissedFor = wipeReportID || 'dismissed';
   document.getElementById('mon-wipe').classList.add('hidden');
 }
 
 async function finishAndWipe() {
-  if (!confirm('Delete SwarmDialer\'s configuration and all stored keys now? This cannot be undone.')) return;
+  if (!confirm("Delete SwarmDialer's configuration and all stored keys now? This cannot be undone.")) return;
   try {
     await api('/api/settings/finish-wipe', {method: 'POST'});
     alert('Wiped. SwarmDialer is restarting; run the Setup Wizard again to test another host.');
@@ -1222,4 +1532,55 @@ async function finishAndWipe() {
   } catch (e) {
     alert('Wipe failed: ' + e.message);
   }
+}
+
+// ---------- Settings: account security ----------
+
+async function changePassword(ev) {
+  ev.preventDefault();
+  const btn = document.getElementById('pw-btn');
+  const statusEl = document.getElementById('pw-status');
+  const cur = document.getElementById('pw-current');
+  const nw = document.getElementById('pw-new');
+  const conf = document.getElementById('pw-confirm');
+  if (nw.value !== conf.value) {
+    statusEl.textContent = "The new password and its confirmation don't match.";
+    statusEl.className = 'status-line error';
+    return;
+  }
+  btn.disabled = true;
+  statusEl.textContent = 'Changing...';
+  statusEl.className = 'status-line';
+  try {
+    await api('/api/account/password', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({current: cur.value, new: nw.value, confirm: conf.value}),
+    });
+    cur.value = nw.value = conf.value = '';
+    statusEl.textContent = 'Password changed. Other sessions were logged out.';
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+  btn.disabled = false;
+}
+
+// ---------- SW Host Benchmark: hardware info only ----------
+
+async function uploadHardwareInfo() {
+  const btn = document.getElementById('hw-upload-btn');
+  const statusEl = document.getElementById('hw-upload-status');
+  btn.disabled = true;
+  statusEl.textContent = 'Collecting hardware info and uploading...';
+  statusEl.className = 'status-line';
+  try {
+    const r = await api('/api/reports/hardware', {method: 'POST'});
+    statusEl.textContent = (r.state === 'uploaded' ? 'Uploaded' : r.state === 'failed' ? 'Upload failed' : 'Saved locally') + ': ' + r.message;
+    statusEl.className = r.state === 'failed' ? 'status-line error' : 'status-line';
+  } catch (e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'status-line error';
+  }
+  btn.disabled = false;
+  refreshReportList();
 }

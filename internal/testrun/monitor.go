@@ -48,6 +48,11 @@ type Monitor struct {
 	node string            // node exporter instance of the active physical node
 	vps  map[string]string // role ("MT"/"CC") -> VPS name (its Prometheus instance)
 
+	// HostCPUs (logical CPUs) and HostMemBytes describe the monitored node,
+	// so VPS figures can be shown as a share of the whole host.
+	HostCPUs     int
+	HostMemBytes float64
+
 	mu        sync.Mutex
 	lastTotal uint64 // /proc/stat jiffies, for SwarmDialer's own CPU
 	lastIdle  uint64
@@ -96,6 +101,12 @@ func NewMonitor(sw *serverware.Client, hostName string, vps map[string]string) (
 		return nil, fmt.Errorf("Prometheus has no host metrics for host %s (no node exporter target named after it)", hostName)
 	}
 	m := &Monitor{sw: sw, node: node, vps: vps}
+	if vals, err := m.queryAll(map[string]string{
+		"cpus": fmt.Sprintf(`count(node_cpu_seconds_total{instance=%q,mode="idle"})`, node),
+		"mem":  fmt.Sprintf(`node_memory_MemTotal_bytes{instance=%q}`, node),
+	}); err == nil {
+		m.HostCPUs, m.HostMemBytes = int(vals["cpus"]), vals["mem"]
+	}
 	m.sampleLocal() // prime the CPU counters
 	return m, nil
 }

@@ -88,6 +88,10 @@ type Config struct {
 	Servers     []*Server    `json:"servers"`
 	Serverware  *Serverware  `json:"serverware,omitempty"`
 	DTCollector *DTCollector `json:"dt_collector,omitempty"`
+	// WizardCompleted records that the Setup Wizard was finished, which
+	// hides its tab. nil (configs from before this field) counts as
+	// finished if any server is configured.
+	WizardCompleted *bool `json:"wizard_completed,omitempty"`
 }
 
 // Store guards Config with a mutex and persists it to path on every
@@ -204,6 +208,26 @@ func (s *Store) SetDTCollector(dt DTCollector) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg.DTCollector = &dt
+	return s.save()
+}
+
+// WizardCompleted reports whether the Setup Wizard is finished. It never is
+// while no server is configured (e.g. after every instance was reset), so
+// the wizard comes back when there's nothing left to use.
+func (s *Store) WizardCompleted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.cfg.Servers) == 0 {
+		return false
+	}
+	return s.cfg.WizardCompleted == nil || *s.cfg.WizardCompleted
+}
+
+// SetWizardCompleted records whether the Setup Wizard is finished.
+func (s *Store) SetWizardCompleted(done bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cfg.WizardCompleted = &done
 	return s.save()
 }
 

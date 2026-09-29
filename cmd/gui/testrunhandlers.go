@@ -36,10 +36,10 @@ func (a *app) testPair() (mt, cc *store.Server, err error) {
 		}
 	}
 	if mt == nil || cc == nil {
-		return nil, nil, errors.New("the test script needs a Multi-Tenant (MT) and a non-Multi-Tenant (CC) instance connected by the wizard")
+		return nil, nil, errors.New("the benchmark needs two PBXware instances connected by a trunk; currently one must be Multi-Tenant (calls are placed from it) and the other not")
 	}
 	if mt.PeerServerID != cc.ID {
-		return nil, nil, errors.New("the MT and CC instances aren't connected with a trunk yet (wizard step 6)")
+		return nil, nil, errors.New("the two PBXware instances aren't connected with a trunk yet (Setup Wizard step 6)")
 	}
 	return mt, cc, nil
 }
@@ -142,17 +142,6 @@ func (a *app) handleTestRunStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown profile %q", req.Profile))
 		return
 	}
-	swCfg := a.store.Serverware()
-	if swCfg == nil {
-		writeError(w, http.StatusBadRequest, errors.New("connect SERVERware first (Setup Wizard step 7, or Settings)"))
-		return
-	}
-	mt, cc, err := a.testPair()
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-
 	a.mu.Lock()
 	if a.testRunner != nil && a.testRunner.Status().Running {
 		a.mu.Unlock()
@@ -161,60 +150,12 @@ func (a *app) handleTestRunStart(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Unlock()
 
-	sw := serverware.NewClient(swCfg.ControllerURL, swCfg.APIKey)
-	vpsNames := map[string]string{}
-	limits := map[string]testrun.VPSLimits{}
-	in := report.Inputs{Profile: profile, Serverware: sw, VPS: map[string]report.VPS{}}
-	for role, s := range map[string]*store.Server{"MT": mt, "CC": cc} {
-		ref, ok := swCfg.PBXwareVPS[s.ID]
-		if !ok {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("%s's VPS isn't known; reconnect SERVERware (Settings)", s.Name))
-			return
-		}
-		v, err := sw.GetVPS(ref.ID)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Errorf("reading %s's VPS from SERVERware: %w", s.Name, err))
-			return
-		}
-		if v.HostID != swCfg.HostID {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("%s's VPS has moved to another host; all VPSs must be on host %s. Reconnect SERVERware after moving it back", s.Name, swCfg.HostName))
-			return
-		}
-		vpsNames[role] = ref.Name
-		limits[role] = testrun.VPSLimits{CPULimit: v.CPULimit, MemLimitMB: v.MemLimitMB, CallrecRAMMB: v.CallrecRAMMB}
-		in.VPS["pbxware_"+strings.ToLower(role)] = report.VPS{CPULimit: v.CPULimit, CPUShare: v.CPUShare, MemLimitMB: v.MemLimitMB, CallrecRAMMB: v.CallrecRAMMB}
-		lic, err := pbxware.NewClient(s.BaseURL, s.APIKey).GetLicenseInfo()
-		if err != nil {
-			writeError(w, http.StatusBadGateway, fmt.Errorf("reading %s's license: %w", s.Name, err))
-			return
-		}
-		in.PBXware = append(in.PBXware, report.PBXwareInstance{Role: role, Version: strings.TrimSpace(v.PBXwareVersion), Edition: s.Edition, LicenseChannels: lic.Channels})
-	}
-	if v, err := sw.GetVPS(swCfg.SwarmDialerVPS.ID); err == nil {
-		in.VPS["swarmdialer"] = report.VPS{CPULimit: v.CPULimit, MemLimitMB: v.MemLimitMB}
-	}
-	hosts, err := sw.Hosts()
+	env, err := a.gatherEnvironment(profile)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("reading SERVERware hosts: %w", err))
+		writeError(w, statusOf(err), err)
 		return
 	}
-	in.Edition = report.Edition(hosts)
-	for _, h := range hosts {
-		if h.ID == swCfg.HostID {
-			in.CPUModel = h.PlatformDetails.CPUModel
-		}
-	}
-	if in.CPUModel == "" {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("SERVERware doesn't report host %s's CPU model (host platform details); reports need it to be comparable", swCfg.HostName))
-		return
-	}
-	sort.Slice(in.PBXware, func(i, j int) bool { return in.PBXware[i].Role > in.PBXware[j].Role }) // MT, CC
-	mon, err := testrun.NewMonitor(sw, swCfg.HostName, vpsNames)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
-	in.Node = mon.Node()
+	in, mon, limits, mt, cc := env.in, env.mon, env.limits, env.mt, env.cc
 
 	runner := testrun.NewRunner(&testEnv{a: a, mt: mt, cc: cc}, mon, limits, profile)
 	a.mu.Lock()
@@ -324,7 +265,7 @@ func (a *app) handleTestRunReadiness(w http.ResponseWriter, r *http.Request) {
 	if pairErr != nil {
 		note = pairErr.Error()
 	}
-	checks = append(checks, check{Label: "MT and CC instances connected by a trunk", OK: pairErr == nil, Note: note})
+	checks = append(checks, check{Label: "Two PBXware instances connected by a trunk", OK: pairErr == nil, Note: note})
 	sw := a.store.Serverware()
 	if sw == nil {
 		checks = append(checks, check{Label: "SERVERware connected", Note: "connect it in Settings or wizard step 7"})
@@ -344,4 +285,96 @@ func (a *app) handleTestRunReadiness(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ready": ready, "checks": checks})
+}
+
+// httpError is an error with the HTTP status to answer it with.
+type httpError struct {
+	status int
+	err    error
+}
+
+func (e *httpError) Error() string { return e.err.Error() }
+func (e *httpError) Unwrap() error { return e.err }
+
+func statusOf(err error) int {
+	var he *httpError
+	if errors.As(err, &he) {
+		return he.status
+	}
+	return http.StatusInternalServerError
+}
+
+// environment is what a report (and a test run) needs to know about the
+// tested host and instances.
+type environment struct {
+	in     report.Inputs
+	mon    *testrun.Monitor
+	limits map[string]testrun.VPSLimits
+	mt, cc *store.Server
+}
+
+// gatherEnvironment checks the setup and reads everything a report's
+// environment section needs: the tested host's hardware and active node,
+// the PBXware VPSs' limits, versions and licenses, and SERVERware's
+// edition. Shared by the test script and "Upload Hardware Info Only".
+func (a *app) gatherEnvironment(profile testrun.Profile) (*environment, error) {
+	bad := func(status int, format string, args ...any) (*environment, error) {
+		return nil, &httpError{status, fmt.Errorf(format, args...)}
+	}
+	swCfg := a.store.Serverware()
+	if swCfg == nil {
+		return bad(http.StatusBadRequest, "connect SERVERware first (Setup Wizard step 7, or Settings)")
+	}
+	mt, cc, err := a.testPair()
+	if err != nil {
+		return nil, &httpError{http.StatusBadRequest, err}
+	}
+	sw := serverware.NewClient(swCfg.ControllerURL, swCfg.APIKey)
+	vpsNames := map[string]string{}
+	limits := map[string]testrun.VPSLimits{}
+	in := report.Inputs{Profile: profile, Serverware: sw, VPS: map[string]report.VPS{}}
+	for role, s := range map[string]*store.Server{"MT": mt, "CC": cc} {
+		ref, ok := swCfg.PBXwareVPS[s.ID]
+		if !ok {
+			return bad(http.StatusBadRequest, "%s's VPS isn't known; reconnect SERVERware (Settings)", s.Name)
+		}
+		v, err := sw.GetVPS(ref.ID)
+		if err != nil {
+			return bad(http.StatusBadGateway, "reading %s's VPS from SERVERware: %v", s.Name, err)
+		}
+		if v.HostID != swCfg.HostID {
+			return bad(http.StatusBadRequest, "%s's VPS has moved to another host; all VPSs must be on host %s. Reconnect SERVERware after moving it back", s.Name, swCfg.HostName)
+		}
+		vpsNames[role] = ref.Name
+		limits[role] = testrun.VPSLimits{CPULimit: v.CPULimit, MemLimitMB: v.MemLimitMB, CallrecRAMMB: v.CallrecRAMMB}
+		in.VPS["pbxware_"+strings.ToLower(role)] = report.VPS{CPULimit: v.CPULimit, CPUShare: v.CPUShare, MemLimitMB: v.MemLimitMB, CallrecRAMMB: v.CallrecRAMMB}
+		lic, err := pbxware.NewClient(s.BaseURL, s.APIKey).GetLicenseInfo()
+		if err != nil {
+			return bad(http.StatusBadGateway, "reading %s's license: %v", s.Name, err)
+		}
+		in.PBXware = append(in.PBXware, report.PBXwareInstance{Role: role, Version: strings.TrimSpace(v.PBXwareVersion), Edition: s.Edition, LicenseChannels: lic.Channels})
+	}
+	if v, err := sw.GetVPS(swCfg.SwarmDialerVPS.ID); err == nil {
+		in.VPS["swarmdialer"] = report.VPS{CPULimit: v.CPULimit, MemLimitMB: v.MemLimitMB}
+	}
+	hosts, err := sw.Hosts()
+	if err != nil {
+		return bad(http.StatusBadGateway, "reading SERVERware hosts: %v", err)
+	}
+	in.Edition = report.Edition(hosts)
+	for _, h := range hosts {
+		if h.ID == swCfg.HostID {
+			in.Platform = h.PlatformDetails
+		}
+	}
+	if in.Platform.CPUModel == "" {
+		return bad(http.StatusBadGateway, "SERVERware doesn't report host %s's CPU model (host platform details); reports need it to be comparable", swCfg.HostName)
+	}
+	sort.Slice(in.PBXware, func(i, j int) bool { return in.PBXware[i].Role > in.PBXware[j].Role }) // MT, CC
+	mon, err := testrun.NewMonitor(sw, swCfg.HostName, vpsNames)
+	if err != nil {
+		return nil, &httpError{http.StatusBadGateway, err}
+	}
+	in.Node = mon.Node()
+	return &environment{in: in, mon: mon, limits: limits, mt: mt, cc: cc}, nil
 }

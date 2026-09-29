@@ -22,7 +22,7 @@ import (
 const SchemaVersion = 1
 
 // SwarmDialerVersion is this SwarmDialer's version, recorded in reports.
-const SwarmDialerVersion = "1.4.0"
+const SwarmDialerVersion = "1.5.0"
 
 type Report struct {
 	SchemaVersion      int         `json:"schema_version"`
@@ -62,6 +62,47 @@ type Host struct {
 	SystemModel  string    `json:"system_model,omitempty"`
 	Disks        []Disk    `json:"disks"`
 	Network      []Network `json:"network"`
+
+	// Added within report format v1 (optional fields; DT Collector keeps
+	// them in the stored report).
+	StorageControllers []Controller `json:"storage_controllers"`
+	NICs               []NICModel   `json:"nics"`
+	Bonds              []Bond       `json:"bonds"`
+	Motherboard        *Motherboard `json:"motherboard,omitempty"`
+}
+
+// Controller is one storage controller model on the host, with how many
+// of it there are.
+type Controller struct {
+	Vendor  string `json:"vendor"`
+	Product string `json:"product"`
+	Count   int    `json:"count"`
+}
+
+// NICModel is one network card model on the host: its ports (Count), the
+// driver, and the fastest link speed seen on its ports (0 if no link).
+type NICModel struct {
+	Vendor    string `json:"vendor"`
+	Product   string `json:"product"`
+	Driver    string `json:"driver"`
+	Count     int    `json:"count"`
+	SpeedMbps int    `json:"speed_mbps"`
+}
+
+// Bond is one bonded (link-aggregated) network interface.
+type Bond struct {
+	Ports int `json:"ports"`
+}
+
+// Motherboard is the host's board and BIOS (no serial numbers or asset
+// tags).
+type Motherboard struct {
+	Vendor      string `json:"vendor"`
+	Model       string `json:"model"`
+	Version     string `json:"version,omitempty"`
+	BIOSVendor  string `json:"bios_vendor,omitempty"`
+	BIOSVersion string `json:"bios_version,omitempty"`
+	BIOSDate    string `json:"bios_date,omitempty"`
 }
 
 type Disk struct {
@@ -186,10 +227,10 @@ type Inputs struct {
 	Edition    string // SERVERware edition
 	VPS        map[string]VPS
 	PBXware    []PBXwareInstance
-	// CPUModel is the host's CPU model as SERVERware reports it (host
-	// platform_details); used as is, so every report names a given CPU
-	// the same way and DT Collector can filter by it.
-	CPUModel string
+	// Platform is the host's platform_details from SERVERware: the CPU
+	// model (used as is, so every report names a given CPU the same way and
+	// DT Collector can filter by it), storage controllers and network cards.
+	Platform serverware.PlatformDetails
 }
 
 // Build assembles a report from a finished run.
@@ -202,9 +243,11 @@ func Build(in Inputs, results []testrun.Result) (*Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading host hardware: %w", err)
 	}
-	if m := strings.TrimSpace(in.CPUModel); m != "" {
+	if m := strings.TrimSpace(in.Platform.CPUModel); m != "" {
 		host.CPUModel = m
 	}
+	host.StorageControllers = storageControllers(in.Platform.StorageCtrls)
+	host.NICs = nicModels(in.Serverware, in.Node, in.Platform.NetworkCards)
 	r := &Report{
 		SchemaVersion: SchemaVersion, ReportID: id, CreatedAt: time.Now().UTC(),
 		SwarmDialerVersion: SwarmDialerVersion,
@@ -214,6 +257,7 @@ func Build(in Inputs, results []testrun.Result) (*Report, error) {
 			Host:       host, VPS: in.VPS, PBXware: in.PBXware,
 		},
 	}
+	r.Tests = []Test{} // a hardware-only report has none; "tests": [] not null
 	for _, res := range results {
 		r.Tests = append(r.Tests, buildTest(res))
 	}
@@ -338,7 +382,22 @@ func hostHardware(sw *serverware.Client, node string) (Host, error) {
 	h.MemoryBytes = int64(num(`node_memory_MemTotal_bytes` + sel))
 
 	if s, err := sw.PromQuery(`node_dmi_info` + sel); err == nil && len(s) > 0 {
-		h.SystemVendor, h.SystemModel = cleanDMI(s[0].Labels["system_vendor"]), cleanDMI(s[0].Labels["product_name"])
+		l := s[0].Labels
+		h.SystemVendor, h.SystemModel = cleanDMI(l["system_vendor"]), cleanDMI(l["product_name"])
+		// Serial numbers, asset tags and the product UUID are deliberately
+		// not read.
+		if mb := (Motherboard{Vendor: cleanDMI(l["board_vendor"]), Model: cleanDMI(l["board_name"]), Version: cleanDMI(l["board_version"]),
+			BIOSVendor: cleanDMI(l["bios_vendor"]), BIOSVersion: cleanDMI(l["bios_version"]), BIOSDate: cleanDMI(l["bios_date"])}); mb.Vendor != "" || mb.Model != "" {
+			h.Motherboard = &mb
+		}
+	}
+	h.Bonds = []Bond{}
+	if s, err := sw.PromQuery(`node_bonding_slaves` + sel); err == nil {
+		for _, x := range s {
+			if x.Value > 0 {
+				h.Bonds = append(h.Bonds, Bond{Ports: int(x.Value)})
+			}
+		}
 	}
 
 	nvme := map[string]bool{}
@@ -426,3 +485,58 @@ func uuidV4() (string, error) {
 }
 
 func round2(x float64) float64 { return math.Round(x*100) / 100 }
+
+// storageControllers groups identical controller models. Entries without a
+// vendor named "Linux" are NVMe-over-TCP targets (network storage), not
+// controllers in the host.
+func storageControllers(devs []serverware.PlatformDevice) []Controller {
+	out := []Controller{}
+	idx := map[string]int{}
+	for _, d := range devs {
+		vendor, product := strings.TrimSpace(d.Vendor), strings.TrimSpace(d.Product)
+		if product == "" || (vendor == "" && product == "Linux") {
+			continue
+		}
+		key := vendor + "|" + product
+		if i, ok := idx[key]; ok {
+			out[i].Count++
+			continue
+		}
+		idx[key] = len(out)
+		out = append(out, Controller{Vendor: vendor, Product: product, Count: 1})
+	}
+	return out
+}
+
+// nicModels groups network ports by card model (vendor, product, driver),
+// with the fastest link speed seen on its ports from node exporter.
+func nicModels(sw *serverware.Client, node string, cards []serverware.PlatformDevice) []NICModel {
+	speed := map[string]int{} // interface -> Mbit/s
+	if sw != nil {
+		if s, err := sw.PromQuery(fmt.Sprintf(`node_network_speed_bytes{instance=%q}`, node)); err == nil {
+			for _, x := range s {
+				if x.Value > 0 {
+					speed[x.Labels["device"]] = int(x.Value * 8 / 1e6)
+				}
+			}
+		}
+	}
+	out := []NICModel{}
+	idx := map[string]int{}
+	for _, c := range cards {
+		vendor, product := strings.TrimSpace(c.Vendor), strings.TrimSpace(c.Product)
+		if product == "" {
+			continue
+		}
+		key := vendor + "|" + product + "|" + c.Driver
+		i, ok := idx[key]
+		if !ok {
+			i = len(out)
+			idx[key] = i
+			out = append(out, NICModel{Vendor: vendor, Product: product, Driver: c.Driver})
+		}
+		out[i].Count++
+		out[i].SpeedMbps = max(out[i].SpeedMbps, speed[c.Name])
+	}
+	return out
+}

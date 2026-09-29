@@ -21,10 +21,63 @@
   --remote: #b48dff;
   --ok: #3ddc97;
   --danger: #ff5470;
+  --on-accent: #1a1305;      /* text on accent (amber) fills */
+  --disabled-bg: #3a3f4d;
+  --danger-hover: #ff7a8f;
+  --stop-text: #06263f;
+  --stop-hover: #7ec2ff;
+  --console-bg: #05060a;     /* call log / call graph */
+  --console-text: #c7cbd6;
+  --tag-local-bg: rgba(94, 177, 255, 0.14);
+  --tag-remote-bg: rgba(180, 141, 255, 0.14);
+  --ring-local: rgba(94, 177, 255, 0.18);
+  --ring-remote: rgba(180, 141, 255, 0.18);
+  --shadow: rgba(0, 0, 0, 0.5);
+  /* Chart series, fixed order: SW host, PBXware MT VPS, PBXware CC VPS.
+     Validated (dataviz palette checks) against the chart surface. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
   --radius: 4px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
+
+/* Light theme (header toggle, remembered per browser). Its chart series
+   are darker steps of the same hues, validated against the light chart
+   surface (--panel-alt): every palette check passes, contrast included. */
+:root[data-theme="light"] {
+  --bg: #eef0f4;
+  --panel: #ffffff;
+  --panel-alt: #f1f3f6;
+  --border: #d5dae3;
+  --text: #151922;
+  --muted: #586174;
+  --accent: #b36b00;
+  --accent-hover: #cc7a00;
+  --local: #1f6fd1;
+  --remote: #7045c8;
+  --ok: #13875a;
+  --danger: #d42f4a;
+  --on-accent: #ffffff;
+  --disabled-bg: #d5dae3;
+  --danger-hover: #e04a63;
+  --stop-text: #ffffff;
+  --stop-hover: #3d86e0;
+  --console-bg: #f7f8fa;
+  --console-text: #2b313d;
+  --tag-local-bg: rgba(31, 111, 209, 0.12);
+  --tag-remote-bg: rgba(112, 69, 200, 0.12);
+  --ring-local: rgba(31, 111, 209, 0.22);
+  --ring-remote: rgba(112, 69, 200, 0.22);
+  --shadow: rgba(20, 25, 35, 0.18);
+  --series-1: #2a78d6;
+  --series-2: #c94f1f;
+  --series-3: #128a60;
+  color-scheme: light;
+}
+:root { color-scheme: dark; }
+:root[data-theme="light"] .brand-icon { filter: invert(1); } /* the logo is white */
 
 * { box-sizing: border-box; }
 
@@ -145,7 +198,7 @@ main {
 
 button.btn {
   background: var(--accent);
-  color: #1a1305;
+  color: var(--on-accent);
   border: none;
   padding: 9px 18px;
   border-radius: var(--radius);
@@ -155,7 +208,7 @@ button.btn {
 }
 
 button.btn:hover { background: var(--accent-hover); }
-button.btn:disabled { background: #3a3f4d; color: var(--muted); cursor: not-allowed; }
+button.btn:disabled { background: var(--disabled-bg); color: var(--muted); cursor: not-allowed; }
 button.btn:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 
 button.btn.secondary {
@@ -171,13 +224,14 @@ button.btn.secondary:hover { border-color: var(--accent); color: var(--accent); 
    warning, distinct from the amber used for ordinary actions, since these
    two are the ones most likely to actually stress a target PBXware system. */
 button.btn.danger { background: var(--danger); color: #fff; }
-button.btn.danger:hover { background: #ff7a8f; }
+button.btn.danger:hover { background: var(--danger-hover); }
+button.btn.danger:disabled { background: var(--disabled-bg); color: var(--muted); cursor: not-allowed; }
 
 /* Stop All — same blue as the Live Status "Total RTP packets" stat, so it
    reads as a distinct, calmer control from the load-generating (amber/red)
    dialer buttons next to it. */
-button.btn.stop { background: var(--local); color: #06263f; }
-button.btn.stop:hover { background: #7ec2ff; }
+button.btn.stop { background: var(--local); color: var(--stop-text); }
+button.btn.stop:hover { background: var(--stop-hover); }
 
 /* Same column template as .form-grid directly above it, so Stop All
    (the row's 3rd item) lands in the same column as the Send RTP
@@ -264,7 +318,7 @@ button.btn.stop:hover { background: #7ec2ff; }
   font-size: 13px;
 }
 
-.view-toggle button.active { background: var(--accent); color: #1a1305; border-color: var(--accent); font-weight: 600; }
+.view-toggle button.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 
 #clear-log-btn {
   margin-left: auto;
@@ -290,14 +344,14 @@ button.btn.stop:hover { background: #7ec2ff; }
   background: currentColor;
 }
 
-.tag.local { background: rgba(94, 177, 255, 0.14); color: var(--local); }
-.tag.remote { background: rgba(180, 141, 255, 0.14); color: var(--remote); }
+.tag.local { background: var(--tag-local-bg); color: var(--local); }
+.tag.remote { background: var(--tag-remote-bg); color: var(--remote); }
 
 #call-log {
   font-family: var(--mono);
   font-size: 12px;
-  background: #05060a;
-  color: #c7cbd6;
+  background: var(--console-bg);
+  color: var(--console-text);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px;
@@ -315,7 +369,7 @@ button.btn.stop:hover { background: #7ec2ff; }
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: #05060a;
+  background: var(--console-bg);
   padding: 8px 12px;
 }
 
@@ -349,7 +403,7 @@ button.btn.stop:hover { background: #7ec2ff; }
   height: 8px;
   border-radius: 50%;
   background: var(--local);
-  box-shadow: 0 0 0 3px rgba(94, 177, 255, 0.18);
+  box-shadow: 0 0 0 3px var(--ring-local);
 }
 
 .call-graph-row .call-line {
@@ -362,7 +416,7 @@ button.btn.stop:hover { background: #7ec2ff; }
 
 .call-graph-row.remote .call-dot {
   background: var(--remote);
-  box-shadow: 0 0 0 3px rgba(180, 141, 255, 0.18);
+  box-shadow: 0 0 0 3px var(--ring-remote);
 }
 
 .call-graph-row.remote .call-line {
@@ -581,3 +635,111 @@ nav.tabs button.logout {
 
 .wipe-prompt { margin-top: 12px; padding: 12px; border: 1px solid var(--danger); border-radius: var(--radius); background: var(--panel-alt); font-size: 14px; }
 .wipe-prompt p { margin: 0 0 10px; }
+
+/* ---------- Collapsible sections (generic) ---------- */
+.collapsible-body.collapsed { display: none; }
+.badge.badge-warn { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- Settings: PBXware instances ---------- */
+.inst-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+.inst-head { margin-bottom: 10px; }
+.inst-head .name { font-weight: 600; }
+.inst-head .meta { color: var(--muted); font-size: 13px; margin-left: 8px; }
+.inst-status { margin-left: 10px; }
+
+/* ---------- SW Host Benchmark: profile info ---------- */
+.profile-row { display: flex; align-items: flex-end; gap: 10px; }
+.profile-row .form-row { min-width: 280px; margin-bottom: 12px; }
+.info-wrap { position: relative; margin-bottom: 14px; }
+.info-btn { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--border); background: var(--panel-alt); color: var(--muted); font: italic 600 14px Georgia, serif; cursor: pointer; }
+.info-btn:hover, .info-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+.info-pop { position: absolute; z-index: 20; left: 0; top: 32px; width: min(720px, 86vw); max-height: 60vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; font-size: 13px; line-height: 1.5; box-shadow: 0 8px 28px var(--shadow); }
+.info-pop h4 { margin: 12px 0 4px; font-size: 13px; color: var(--text); }
+.info-pop h4:first-child { margin-top: 0; }
+.info-pop p, .info-pop ul, .info-pop ol { margin: 4px 0 8px; color: var(--muted); }
+.info-pop b { color: var(--text); }
+.info-pop table { border-collapse: collapse; margin: 6px 0 10px; }
+.info-pop th, .info-pop td { border: 1px solid var(--border); padding: 4px 6px; vertical-align: top; color: var(--muted); }
+.info-pop th { color: var(--text); background: var(--panel-alt); }
+
+/* ---------- SW Host Benchmark: showcase ---------- */
+.show-head { display: flex; justify-content: space-between; align-items: center; }
+.show-head h2 { margin: 0; }
+.run-progress { margin: 14px 0 16px; }
+.run-progress-bar { height: 8px; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.run-progress-bar > div { height: 100%; width: 0; background: var(--accent); border-radius: 8px; transition: width 0.6s; }
+.run-progress-text { font-size: 13px; color: var(--muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+
+.steps { list-style: none; padding: 0; margin: 0 0 16px; display: grid; gap: 6px; }
+.step { display: flex; gap: 12px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-alt); }
+.step-num { flex: 0 0 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; border: 1px solid var(--border); color: var(--muted); }
+.step-title { font-size: 14px; }
+.step-desc, .step-result { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.step.future, .step.done { opacity: 0.5; }
+.step.done .step-num { color: var(--ok); border-color: var(--ok); }
+.step.current { border-color: var(--accent); opacity: 1; }
+.step.current .step-title { font-weight: 700; }
+.step.current .step-num { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.step-result .ok { color: var(--ok); }
+.step-result .warn { color: var(--accent); }
+.phases { margin-top: 6px; font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.phase { padding: 1px 7px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); }
+.phase.past { opacity: 0.5; }
+.phase.now { color: var(--on-accent); background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.phases .sep { color: var(--muted); }
+
+.hero { display: grid; grid-template-columns: minmax(180px, 240px) 1fr; gap: 14px; margin-bottom: 16px; }
+.hero-calls { background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; justify-content: center; }
+.hero-num { font-family: var(--mono); font-size: 44px; line-height: 1; font-variant-numeric: tabular-nums; }
+.hero-of { font-size: 20px; color: var(--muted); }
+.hero-label { font-size: 13px; color: var(--muted); margin: 6px 0 10px; }
+.meter { height: 6px; background: var(--bg); border-radius: 6px; overflow: hidden; }
+.meter > div { height: 100%; background: var(--accent); border-radius: 6px; transition: width 0.6s; }
+.meter.sm { height: 4px; margin-top: 6px; }
+.meter.sm > div { background: var(--muted); }
+.gauges { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.gauge { background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.gv { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+.gv .u { font-size: 11px; color: var(--muted); margin-left: 3px; }
+.gk { font-size: 12px; color: var(--muted); }
+
+.show-charts { display: grid; gap: 14px; margin-bottom: 8px; }
+.tchart { margin: 0; background: var(--panel-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+.tchart figcaption { font-size: 13px; color: var(--text); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin: 4px 0 2px; }
+.legend i, .tip i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.tchart-plot { position: relative; }
+.tchart svg { display: block; width: 100%; }
+.tchart .grid { stroke: var(--border); stroke-width: 1; }
+.tchart .bound { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 3; }
+.tchart .target { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 4; }
+.tchart .axis { fill: var(--muted); font-size: 11px; }
+.tchart .endlbl { fill: var(--text); font-size: 11px; font-family: var(--mono); }
+.tchart .tl { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.tchart .cursor { stroke: var(--muted); stroke-width: 1; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px; font-size: 12px; color: var(--muted); white-space: nowrap; box-shadow: 0 4px 16px var(--shadow); }
+.tip b { color: var(--text); font-family: var(--mono); }
+.tip-h { color: var(--text); margin-bottom: 3px; }
+
+/* Present mode: the showcase alone, full screen */
+.showcase:fullscreen { overflow-y: auto; padding: 28px 36px; background: var(--bg); border: none; }
+.showcase:fullscreen .hero-num { font-size: 64px; }
+.showcase:fullscreen .gv { font-size: 24px; }
+.showcase:fullscreen .run-details { display: none; }
+
+@media (max-width: 700px) {
+  .hero { grid-template-columns: 1fr; }
+  .profile-row .form-row { min-width: 0; flex: 1; }
+}
+
+/* ---------- Theme toggle (header, top right) ---------- */
+header { position: relative; }
+.theme-toggle {
+  position: absolute; top: 14px; right: 18px;
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel-alt); color: var(--text);
+  font-size: 17px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

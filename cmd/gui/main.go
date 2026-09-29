@@ -63,6 +63,7 @@ func main() {
 	app.registerRoutes(mux)
 	mux.HandleFunc("/api/login", auth.handleLogin)
 	mux.HandleFunc("/api/logout", auth.handleLogout)
+	mux.HandleFunc("/api/account/password", auth.handleChangePassword)
 
 	srv := &http.Server{Addr: *addr, Handler: auth.require(mux)}
 	var redirect *http.Server

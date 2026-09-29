@@ -63,7 +63,7 @@ optionally have it delete the resources it created later.
 
 ## SERVERware host testing
 
-The **SERVERware Monitoring** tab runs a fixed, versioned test script
+The **SW Host Benchmark** tab runs a fixed, versioned test script
 (profile "standard") of call-load tests on remote calls between the two
 PBXware instances, while monitoring the SERVERware host and the PBXware
 VPSs through SERVERware's Prometheus. SwarmDialer and both PBXware VPSs
@@ -76,6 +76,18 @@ Collector, the central report server (`https://dtcollector.dtbicom.xyz`
 by default; the URL and the upload key are set in Settings). A "smoke"
 profile of a few minutes is available for checking the setup; its
 reports are never uploaded.
+
+While a run is going, the tab shows its progress test by test, live
+figures and whole-run charts of host and PBXware VPS load; **Present**
+shows that view full screen. **Previous Reports** lists every saved
+report (view, download, delete), and **Upload Hardware Info Only** sends
+just the host's hardware and environment to DT Collector without running
+tests.
+
+Once the Setup Wizard is finished its tab is hidden; connected instances
+are then reconfigured (name, address, API keys) under **Settings ->
+PBXware Instances**. The admin password can be changed under **Settings ->
+Account Security**. A light/dark theme toggle is at the top right.
 
 ## Configuration and security
 

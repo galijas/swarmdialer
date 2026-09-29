@@ -137,9 +137,21 @@ type Host struct {
 
 // PlatformDetails is the hardware subset of a host's platform_details.
 type PlatformDetails struct {
-	CPUModel    string `json:"cpu_model"` // e.g. "Intel(R) Xeon(R) Silver 4208 CPU @ 2.10GHz"
-	CPUCount    int    `json:"cpu_count"` // logical CPUs
-	Motherboard string `json:"motherboard"`
+	CPUModel     string           `json:"cpu_model"` // e.g. "Intel(R) Xeon(R) Silver 4208 CPU @ 2.10GHz"
+	CPUCount     int              `json:"cpu_count"` // logical CPUs
+	Motherboard  string           `json:"motherboard"`
+	StorageCtrls []PlatformDevice `json:"storage_ctrls"`
+	NetworkCards []PlatformDevice `json:"network_cards"`
+}
+
+// PlatformDevice is one storage controller or network card from a host's
+// platform_details.
+type PlatformDevice struct {
+	Name        string `json:"name"` // network cards: interface name, e.g. "ens1f0"
+	Vendor      string `json:"vendor"`
+	Product     string `json:"product"`
+	Description string `json:"description"`
+	Driver      string `json:"driver"`
 }
 
 // Hosts lists the network's hosts. Also the cheapest call to check that

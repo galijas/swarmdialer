@@ -101,13 +101,22 @@ func newAuthManager(path string) (*authManager, error) {
 // path (root-only), and returns the plaintext so it can be shown once.
 func resetPassword(path string) (string, error) {
 	pw := randomToken(18) // 24 URL-safe characters
+	if _, err := setPassword(path, pw); err != nil {
+		return "", err
+	}
+	return pw, nil
+}
+
+// setPassword stores pw's salted hash at path (root-only) and returns the
+// new record.
+func setPassword(path, pw string) (authRecord, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
-		return "", err
+		return authRecord{}, err
 	}
 	hash, err := pbkdf2.Key(sha256.New, pw, salt, pbkdf2Iterations, 32)
 	if err != nil {
-		return "", err
+		return authRecord{}, err
 	}
 	rec := authRecord{
 		Username:   authUsername,
@@ -117,16 +126,16 @@ func resetPassword(path string) (string, error) {
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		return "", err
+		return authRecord{}, err
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return "", err
+		return authRecord{}, err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return "", err
+		return authRecord{}, err
 	}
-	return pw, nil
+	return rec, nil
 }
 
 func randomToken(nBytes int) string {
@@ -137,17 +146,23 @@ func randomToken(nBytes int) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// checkPassword verifies credentials against the stored hash. The hash is
+// copied under the lock and checked outside it: PBKDF2 is deliberately
+// slow, and holding the lock would stall every other request meanwhile.
 func (m *authManager) checkPassword(username, password string) bool {
-	salt, err1 := base64.StdEncoding.DecodeString(m.record.Salt)
-	want, err2 := base64.StdEncoding.DecodeString(m.record.Hash)
+	m.mu.Lock()
+	rec := m.record
+	m.mu.Unlock()
+	salt, err1 := base64.StdEncoding.DecodeString(rec.Salt)
+	want, err2 := base64.StdEncoding.DecodeString(rec.Hash)
 	if err1 != nil || err2 != nil {
 		return false
 	}
-	got, err := pbkdf2.Key(sha256.New, password, salt, m.record.Iterations, len(want))
+	got, err := pbkdf2.Key(sha256.New, password, salt, rec.Iterations, len(want))
 	if err != nil {
 		return false
 	}
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(m.record.Username)) == 1
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(rec.Username)) == 1
 	return subtle.ConstantTimeCompare(got, want) == 1 && userOK
 }
 
@@ -159,20 +174,16 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-func (m *authManager) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
-	ip := clientIP(r)
-
+// throttle applies the failed-login slow-down and lockout for ip. It
+// returns an error (and writes the response) if ip is locked out.
+func (m *authManager) throttle(w http.ResponseWriter, ip string) bool {
 	m.mu.Lock()
 	f := m.failures[ip]
 	if f != nil && time.Now().Before(f.lockedUntil) {
 		wait := time.Until(f.lockedUntil).Round(time.Minute)
 		m.mu.Unlock()
-		writeError(w, http.StatusTooManyRequests, fmt.Errorf("too many failed logins, try again in %s", wait))
-		return
+		writeError(w, http.StatusTooManyRequests, fmt.Errorf("too many failed attempts, try again in %s", wait))
+		return false
 	}
 	delay := time.Duration(0)
 	if f != nil && f.count >= loginSlowAfter {
@@ -180,6 +191,105 @@ func (m *authManager) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Unlock()
 	time.Sleep(delay)
+	return true
+}
+
+// recordFailure counts one wrong password from ip, locking it out after
+// loginLockAfter.
+func (m *authManager) recordFailure(ip string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f := m.failures[ip]
+	if f == nil {
+		f = &loginFailures{}
+		m.failures[ip] = f
+	}
+	f.count++
+	if f.count >= loginLockAfter {
+		f.lockedUntil = time.Now().Add(loginLockout)
+		f.count = 0
+		log.Printf("login: %s locked out for %s after %d failed attempts", ip, loginLockout, loginLockAfter)
+	}
+}
+
+// minPasswordLength is the shortest admin password accepted when changing it.
+const minPasswordLength = 12
+
+// handleChangePassword changes the admin password (Settings → Account
+// Security). The current password is required, and wrong attempts count
+// toward the same slow-down and lockout as logins. Every other session is
+// logged out; the caller's own session stays valid.
+func (m *authManager) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := clientIP(r)
+	if !m.throttle(w, ip) {
+		return
+	}
+	var req struct {
+		Current string `json:"current"`
+		New     string `json:"new"`
+		Confirm string `json:"confirm"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	m.mu.Lock()
+	user := m.record.Username
+	m.mu.Unlock()
+	ok := m.checkPassword(user, req.Current)
+	if !ok {
+		m.recordFailure(ip)
+		// 403, not 401: the session is valid; the GUI treats 401 as "log in again".
+		writeError(w, http.StatusForbidden, errors.New("the current password is wrong"))
+		return
+	}
+	switch {
+	case len(req.New) < minPasswordLength:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("the new password must be at least %d characters", minPasswordLength))
+		return
+	case req.New != req.Confirm:
+		writeError(w, http.StatusBadRequest, errors.New("the new password and its confirmation don't match"))
+		return
+	case req.New == req.Current:
+		writeError(w, http.StatusBadRequest, errors.New("the new password must be different from the current one"))
+		return
+	}
+	rec, err := setPassword(m.path, req.New)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("saving the new password: %w", err))
+		return
+	}
+	current := ""
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		current = c.Value
+	}
+	m.mu.Lock()
+	m.record = rec
+	delete(m.failures, ip)
+	for token := range m.sessions {
+		if token != current {
+			delete(m.sessions, token)
+		}
+	}
+	m.mu.Unlock()
+	log.Printf("admin password changed from %s; other sessions logged out", ip)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "changed"})
+}
+
+func (m *authManager) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	ip := clientIP(r)
+
+	if !m.throttle(w, ip) {
+		return
+	}
 
 	var req struct {
 		Username string `json:"username"`
@@ -190,20 +300,9 @@ func (m *authManager) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !m.checkPassword(req.Username, req.Password) {
-		m.mu.Lock()
-		f := m.failures[ip]
-		if f == nil {
-			f = &loginFailures{}
-			m.failures[ip] = f
-		}
-		f.count++
-		if f.count >= loginLockAfter {
-			f.lockedUntil = time.Now().Add(loginLockout)
-			f.count = 0
-			log.Printf("login: %s locked out for %s after %d failed attempts", ip, loginLockout, loginLockAfter)
-		}
-		m.mu.Unlock()
+	ok := m.checkPassword(req.Username, req.Password)
+	if !ok {
+		m.recordFailure(ip)
 		writeError(w, http.StatusUnauthorized, errors.New("wrong username or password"))
 		return
 	}
@@ -251,7 +350,7 @@ func (m *authManager) validSession(r *http.Request) bool {
 // publicPaths are served without a session: the login page and what it
 // needs to render.
 var publicPaths = map[string]bool{
-	"/login.html": true, "/login.js": true, "/style.css": true,
+	"/login.html": true, "/login.js": true, "/style.css": true, "/theme.js": true,
 	"/icons/logo-white.svg": true, "/api/login": true, "/api/logout": true,
 }
 

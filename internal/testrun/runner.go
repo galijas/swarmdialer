@@ -174,10 +174,47 @@ type Status struct {
 	// CurrentSamples are the running test's samples so far (for live
 	// charts); empty between tests.
 	CurrentSamples []Sample `json:"current_samples,omitempty"`
+	// Timeline is every sample of the run so far, compacted, for the
+	// whole-run charts.
+	Timeline []TimelinePoint `json:"timeline,omitempty"`
+	// Host size, to show VPS load as a share of the host.
+	HostCPUs     int     `json:"host_cpus"`
+	HostMemBytes float64 `json:"host_mem_bytes"`
+	// EstimatedSec is the profile's expected total duration.
+	EstimatedSec int `json:"estimated_sec"`
+	// Peaks so far in the run.
+	PeakCalls      int      `json:"peak_calls"`
+	PeakHostCPUPct float64  `json:"peak_host_cpu_pct"`
+	PeakHostMemPct float64  `json:"peak_host_mem_pct"`
 	Results        []Result `json:"results"`
 	Done           bool     `json:"done"`
 	Error          string   `json:"error,omitempty"`
 	Log            []string `json:"log"`
+}
+
+// TimelinePoint is one compact sample for the whole-run charts. CPU values
+// are percent of one core for VPSs (as measured); the page converts them
+// with Status.HostCPUs.
+type TimelinePoint struct {
+	T          int64              `json:"t"` // unix seconds
+	Test       int                `json:"test"`
+	Phase      string             `json:"phase"`
+	Calls      int                `json:"calls"`
+	HostCPUPct float64            `json:"host_cpu"`
+	HostMemPct float64            `json:"host_mem"`
+	VPSCPUPct  map[string]float64 `json:"vps_cpu"`
+	VPSMemB    map[string]float64 `json:"vps_mem"`
+}
+
+func timelinePoint(test int, s Sample) TimelinePoint {
+	p := TimelinePoint{T: s.T.Unix(), Test: test, Phase: s.Phase, Calls: s.ConcurrentCalls,
+		HostCPUPct: round2(s.Host.CPUPct), HostMemPct: round2(s.Host.MemPct),
+		VPSCPUPct: map[string]float64{}, VPSMemB: map[string]float64{}}
+	for role, v := range s.VPS {
+		p.VPSCPUPct[role] = round2(v.CPUPct)
+		p.VPSMemB[role] = math.Round(v.MemBytes)
+	}
+	return p
 }
 
 // Runner executes one profile run.
@@ -216,6 +253,25 @@ func (r *Runner) Status() Status {
 	st.Log = append([]string(nil), r.status.Log...)
 	if r.current != nil {
 		st.CurrentSamples = append([]Sample(nil), r.current.Samples...)
+	}
+	st.HostCPUs, st.HostMemBytes = r.mon.HostCPUs, r.mon.HostMemBytes
+	st.EstimatedSec = int(r.profile.EstimatedDuration().Seconds())
+	add := func(test int, samples []Sample) {
+		for _, s := range samples {
+			st.Timeline = append(st.Timeline, timelinePoint(test, s))
+			if s.Phase == "baseline" || s.Phase == "cooldown" {
+				continue // peaks are about load, not idle spikes
+			}
+			st.PeakCalls = max(st.PeakCalls, s.ConcurrentCalls)
+			st.PeakHostCPUPct = math.Max(st.PeakHostCPUPct, round2(s.Host.CPUPct))
+			st.PeakHostMemPct = math.Max(st.PeakHostMemPct, round2(s.Host.MemPct))
+		}
+	}
+	for i, res := range r.status.Results {
+		add(i+1, res.Samples)
+	}
+	if r.current != nil {
+		add(len(r.status.Results)+1, r.current.Samples)
 	}
 	return st
 }

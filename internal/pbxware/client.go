@@ -5,6 +5,7 @@ package pbxware
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,13 +60,13 @@ func (c *Client) call(action string, params url.Values) (map[string]any, error) 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling %s: %w", action, err)
+		return nil, fmt.Errorf("calling %s: %w", action, c.redact(err))
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response for %s: %w", action, err)
+		return nil, fmt.Errorf("reading response for %s: %w", action, c.redact(err))
 	}
 
 	var body map[string]any
@@ -484,4 +485,17 @@ func toInt(v any) (int, error) {
 	default:
 		return 0, fmt.Errorf("unexpected type %T for numeric field", v)
 	}
+}
+
+// redact strips the API key from an HTTP error. The legacy API takes the
+// key as a URL parameter, and Go's HTTP errors quote the full request URL,
+// so without this the key ends up in error messages shown in the GUI and
+// written to logs.
+func (c *Client) redact(err error) error {
+	if err == nil || c.APIKey == "" {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), url.QueryEscape(c.APIKey), "REDACTED")
+	msg = strings.ReplaceAll(msg, c.APIKey, "REDACTED")
+	return errors.New(msg)
 }

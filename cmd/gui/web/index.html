@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>SwarmDialer</title>
 <link rel="icon" type="image/svg+xml" href="/icons/logo-white.svg">
+<script src="/theme.js"></script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -13,10 +14,11 @@
     <img src="/icons/logo-white.svg" alt="" class="brand-icon">
     <h1>SwarmDialer</h1>
   </div>
+  <button class="theme-toggle" id="theme-toggle" type="button" onclick="toggleTheme()">&#9728;</button>
   <nav class="tabs">
     <button id="tab-btn-wizard" class="active" onclick="showTab('wizard')">Setup Wizard</button>
     <button id="tab-btn-dashboard" onclick="showTab('dashboard')">Dashboard</button>
-    <button id="tab-btn-monitoring" onclick="showTab('monitoring')">SERVERware Monitoring</button>
+    <button id="tab-btn-monitoring" onclick="showTab('monitoring')">SW Host Benchmark</button>
     <button id="tab-btn-settings" onclick="showTab('settings')">Settings</button>
     <button class="logout" onclick="logout()">Log out</button>
   </nav>
@@ -132,9 +134,10 @@
 <section id="tab-dashboard" class="hidden">
 
   <div class="panel">
-    <h2>Connected Servers</h2>
-    <div id="server-list"></div>
-    <button class="btn secondary" onclick="showTab('wizard')">Reconfigure</button>
+    <h2 class="collapsible-header" id="servers-header" onclick="toggleSection('servers')">
+      <span class="chevron">&#9656;</span> Connected Servers <span class="badge" id="servers-count">0</span>
+    </h2>
+    <div id="servers-body" class="collapsible-body collapsed"><div id="server-list"></div></div>
   </div>
 
   <div class="panel">
@@ -251,48 +254,102 @@
 <section id="tab-monitoring" class="hidden">
 
   <div class="panel">
-    <h2>Readiness</h2>
-    <ul class="checklist" id="mon-checks"><li>Loading...</li></ul>
+    <h2 class="collapsible-header" id="ready-header" onclick="toggleSection('ready')">
+      <span class="chevron">&#9656;</span> Readiness <span class="badge" id="ready-count">…</span>
+    </h2>
+    <div id="ready-body" class="collapsible-body collapsed">
+      <ul class="checklist" id="mon-checks"><li>Loading...</li></ul>
+    </div>
   </div>
 
   <div class="panel">
     <h2>Test Script</h2>
-    <p class="status-line">Runs a fixed sequence of call-load tests on remote calls (MT to CC) while monitoring the SERVERware host and the PBXware VPSs. Each test stops early if the host or a VPS is saturated. Manual dialing is paused while the script runs.</p>
-    <div class="form-grid">
-      <div class="form-row"><label for="mon-profile">Profile</label><select id="mon-profile" onchange="renderProfileTests()"></select></div>
+    <p class="status-line">Runs a fixed sequence of call-load tests on remote calls between instances while monitoring the SERVERware host and the PBXware VPSs. Each test stops early if the host or a VPS is saturated. Manual dialing is paused while the script runs.</p>
+    <div class="profile-row">
+      <div class="form-row"><label for="mon-profile">Profile</label><select id="mon-profile" onchange="renderShowcase()"></select></div>
+      <div class="info-wrap">
+        <button class="info-btn" id="mon-info-btn" type="button" aria-label="About this profile" aria-expanded="false" onclick="toggleProfileInfo(event)">i</button>
+        <div class="info-pop hidden" id="mon-info-pop" role="dialog"></div>
+      </div>
     </div>
-    <table class="mon-table" id="mon-profile-tests"></table>
     <div class="increment-row">
-      <button class="btn" id="mon-start-btn" onclick="startTestRun()" disabled>Start Test Script</button>
+      <button class="btn danger" id="mon-start-btn" onclick="startTestRun()" disabled>Start Test Script</button>
       <button class="btn danger hidden" id="mon-cancel-btn" onclick="cancelTestRun()">Cancel Run</button>
     </div>
     <div class="status-line" id="mon-start-status"></div>
   </div>
 
-  <div class="panel hidden" id="mon-run-panel">
-    <h2 id="mon-run-title">Run</h2>
-    <p class="status-line" id="mon-run-line"></p>
-    <div class="tiles" id="mon-tiles"></div>
-    <div class="mon-charts">
-      <figure class="mon-chart"><figcaption>Host CPU (%)</figcaption><svg id="mon-chart-cpu" viewBox="0 0 600 160" preserveAspectRatio="none"></svg></figure>
-      <figure class="mon-chart"><figcaption>Calls at once</figcaption><svg id="mon-chart-calls" viewBox="0 0 600 160" preserveAspectRatio="none"></svg></figure>
+  <!-- Showcase: progress, live state and whole-run charts -->
+  <div class="panel showcase" id="mon-show">
+    <div class="show-head">
+      <h2 id="show-title">Benchmark</h2>
+      <button class="btn secondary" id="show-present-btn" onclick="togglePresent()">Present</button>
     </div>
-    <h3 class="mon-sub">Results</h3>
-    <div class="table-scroll"><table class="mon-table" id="mon-results"></table></div>
-    <div id="mon-report" class="mon-report hidden">
-      <h3 class="mon-sub">Report</h3>
-      <p class="status-line" id="mon-report-line"></p>
-      <button class="btn secondary hidden" id="mon-report-retry" onclick="retryReportUpload()">Retry upload</button>
-      <div class="wipe-prompt hidden" id="mon-wipe">
-        <p><strong>Finish and wipe?</strong> Deletes SwarmDialer's configuration and every stored key and credential (PBXware and SERVERware API keys, the DT Collector upload key, extension SIP secrets), then restarts. Your login, call logs and saved reports are kept, and nothing on PBXware or SERVERware changes. Choose No to keep testing.</p>
-        <div class="increment-row">
-          <button class="btn danger" onclick="finishAndWipe()">Yes, wipe</button>
-          <button class="btn secondary" onclick="dismissWipe()">No, keep testing</button>
+    <div class="run-progress">
+      <div class="run-progress-bar"><div id="run-progress-fill"></div></div>
+      <div class="run-progress-text" id="run-progress-text">Not started</div>
+    </div>
+
+    <ol class="steps" id="show-steps"></ol>
+
+    <div class="hero hidden" id="show-hero">
+      <div class="hero-calls">
+        <div class="hero-num"><span id="hero-calls">0</span><span class="hero-of" id="hero-target"></span></div>
+        <div class="hero-label">calls at once</div>
+        <div class="meter"><div id="hero-calls-bar"></div></div>
+      </div>
+      <div class="gauges" id="show-gauges"></div>
+    </div>
+
+    <div class="show-charts hidden" id="show-charts">
+      <figure class="tchart">
+        <figcaption>CPU (% of the whole host)</figcaption>
+        <div class="legend" id="leg-cpu"></div>
+        <div class="tchart-plot"><svg id="chart-cpu"></svg><div class="tip hidden"></div></div>
+      </figure>
+      <figure class="tchart">
+        <figcaption>Memory used (GB)</figcaption>
+        <div class="legend" id="leg-mem"></div>
+        <div class="tchart-plot"><svg id="chart-mem"></svg><div class="tip hidden"></div></div>
+      </figure>
+      <figure class="tchart">
+        <figcaption>Calls at once</figcaption>
+        <div class="tchart-plot"><svg id="chart-calls"></svg><div class="tip hidden"></div></div>
+      </figure>
+    </div>
+
+    <div class="run-details hidden" id="mon-run-panel">
+      <h3 class="mon-sub">Results</h3>
+      <div class="table-scroll"><table class="mon-table" id="mon-results"></table></div>
+      <div id="mon-report" class="mon-report hidden">
+        <h3 class="mon-sub">Report</h3>
+        <p class="status-line" id="mon-report-line"></p>
+        <button class="btn secondary hidden" id="mon-report-retry" onclick="retryReportUpload()">Retry upload</button>
+        <div class="wipe-prompt hidden" id="mon-wipe">
+          <p><strong>Finish and wipe?</strong> Deletes SwarmDialer's configuration and every stored key and credential (PBXware and SERVERware API keys, the DT Collector upload key, extension SIP secrets), then restarts. Your login, call logs and saved reports are kept, and nothing on PBXware or SERVERware changes. Choose No to keep testing.</p>
+          <div class="increment-row">
+            <button class="btn danger" onclick="finishAndWipe()">Yes, wipe</button>
+            <button class="btn secondary" onclick="dismissWipe()">No, keep testing</button>
+          </div>
         </div>
       </div>
+      <h3 class="mon-sub collapsible-header" id="runlog-header" onclick="toggleSection('runlog')"><span class="chevron">&#9656;</span> Run log</h3>
+      <div id="runlog-body" class="collapsible-body collapsed"><div class="mon-log" id="mon-log"></div></div>
     </div>
-    <h3 class="mon-sub">Run log</h3>
-    <div class="mon-log" id="mon-log"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Hardware Info</h2>
+    <p class="status-line">Sends the tested host's hardware and environment to DT Collector without running any tests: CPU, sockets, cores and threads, max clock, memory, disks, storage controllers, NICs, motherboard and BIOS, plus the SERVERware and PBXware versions. A copy is saved in Previous Reports.</p>
+    <button class="btn secondary" id="hw-upload-btn" onclick="uploadHardwareInfo()">Upload Hardware Info Only</button>
+    <span class="status-line" id="hw-upload-status"></span>
+  </div>
+
+  <div class="panel">
+    <h2 class="collapsible-header" id="reports-header" onclick="toggleSection('reports')">
+      <span class="chevron">&#9656;</span> Previous Reports <span class="badge" id="reports-count">0</span>
+    </h2>
+    <div id="reports-body" class="collapsible-body collapsed"><div id="report-list" class="log-list"></div></div>
   </div>
 
 </section>
@@ -314,6 +371,13 @@
     <h2>SERVERware</h2>
     <p class="status-line" id="sw-settings-status">Loading...</p>
     <button class="btn secondary" id="sw-settings-btn" onclick="showTab('wizard'); showStep('step-serverware')">Connect SERVERware</button>
+  </div>
+
+  <div class="panel">
+    <h2>PBXware Instances</h2>
+    <p class="status-line">Change a connected instance's name, address or API keys (leave a key empty to keep the saved one). The new details are tested before saving. To connect a different PBXware system, reset the instance below and run the Setup Wizard again.</p>
+    <div id="inst-list"></div>
+    <button class="btn secondary hidden" id="inst-add-btn" onclick="addSecondInstance()">Add second instance</button>
   </div>
 
   <div class="panel">
@@ -347,10 +411,26 @@
     <div class="status-line" id="reset-all-status"></div>
   </div>
 
+  <div class="panel">
+    <h2>Account Security</h2>
+    <p class="status-line">Change the admin password. It must be at least 12 characters. Other logged-in sessions are logged out; this one stays logged in.</p>
+    <form id="pw-form" onsubmit="changePassword(event)">
+      <input type="text" name="username" value="admin" autocomplete="username" hidden>
+      <div class="form-grid">
+        <div class="form-row"><label for="pw-current">Current password</label><input id="pw-current" type="password" autocomplete="current-password" required></div>
+        <div class="form-row"><label for="pw-new">New password</label><input id="pw-new" type="password" autocomplete="new-password" minlength="12" required></div>
+        <div class="form-row"><label for="pw-confirm">Confirm new password</label><input id="pw-confirm" type="password" autocomplete="new-password" minlength="12" required></div>
+      </div>
+      <button class="btn secondary" type="submit" id="pw-btn">Change password</button>
+      <span class="status-line" id="pw-status"></span>
+    </form>
+  </div>
+
 </section>
 
 </main>
 
+<script src="/profile-info.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
