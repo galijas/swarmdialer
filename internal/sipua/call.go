@@ -107,6 +107,14 @@ func NewPhone(ctx context.Context, localIP string, localPort int, ep Endpoint) (
 			log.Printf("sipua: %s: responding to OPTIONS: %v", ep.AOR, err)
 		}
 	})
+	server.OnNotify(func(req *sip.Request, tx sip.ServerTransaction) {
+		// PBXware sends registered phones unsolicited NOTIFYs (message-
+		// waiting status), one per extension around each registration.
+		// Accept them as a real phone does; without a handler the SIP
+		// library answered 405 and logged a warning for each (hundreds of
+		// thousands a day at load-test scale).
+		_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil))
+	})
 	server.OnAck(func(req *sip.Request, tx sip.ServerTransaction) {
 		if err := dialogServer.ReadAck(req, tx); err != nil {
 			log.Printf("sipua: %s: ACK for unknown dialog: %v", ep.AOR, err)
