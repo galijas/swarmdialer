@@ -33,11 +33,13 @@
   --ring-local: rgba(94, 177, 255, 0.18);
   --ring-remote: rgba(180, 141, 255, 0.18);
   --shadow: rgba(0, 0, 0, 0.5);
-  /* Chart series, fixed order: SW host, PBXware MT VPS, PBXware CC VPS.
-     Validated (dataviz palette checks) against the chart surface. */
+  /* Chart series, fixed order: SW host, PBXware MT VPS, PBXware CC VPS,
+     SwarmDialer VPS. Validated (dataviz palette checks, all pairs, since
+     the lines overlap) against the chart surface. */
   --series-1: #3987e5;
   --series-2: #d95926;
   --series-3: #199e70;
+  --series-4: #cc58b0;
   --radius: 4px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -74,6 +76,7 @@
   --series-1: #2a78d6;
   --series-2: #c94f1f;
   --series-3: #128a60;
+  --series-4: #b03c96;
   color-scheme: light;
 }
 :root { color-scheme: dark; }

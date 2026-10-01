@@ -180,6 +180,9 @@ type Status struct {
 	// Host size, to show VPS load as a share of the host.
 	HostCPUs     int     `json:"host_cpus"`
 	HostMemBytes float64 `json:"host_mem_bytes"`
+	// VPSMemLimitMB are the PBXware VPSs' memory limits (0: none), to show
+	// their memory against the limit.
+	VPSMemLimitMB map[string]int `json:"vps_mem_limit_mb"`
 	// EstimatedSec is the profile's expected total duration.
 	EstimatedSec int `json:"estimated_sec"`
 	// Peaks so far in the run.
@@ -194,7 +197,8 @@ type Status struct {
 
 // TimelinePoint is one compact sample for the whole-run charts. CPU values
 // are percent of one core for VPSs (as measured); the page converts them
-// with Status.HostCPUs.
+// with Status.HostCPUs. VPS maps hold MT, CC and swarmdialer (SwarmDialer's
+// own VPS, measured locally).
 type TimelinePoint struct {
 	T          int64              `json:"t"` // unix seconds
 	Test       int                `json:"test"`
@@ -214,6 +218,8 @@ func timelinePoint(test int, s Sample) TimelinePoint {
 		p.VPSCPUPct[role] = round2(v.CPUPct)
 		p.VPSMemB[role] = math.Round(v.MemBytes)
 	}
+	p.VPSCPUPct["swarmdialer"] = round2(s.Local.CPUCorePct)
+	p.VPSMemB["swarmdialer"] = math.Round(s.Local.MemBytes)
 	return p
 }
 
@@ -255,6 +261,10 @@ func (r *Runner) Status() Status {
 		st.CurrentSamples = append([]Sample(nil), r.current.Samples...)
 	}
 	st.HostCPUs, st.HostMemBytes = r.mon.HostCPUs, r.mon.HostMemBytes
+	st.VPSMemLimitMB = map[string]int{}
+	for role, lim := range r.limits {
+		st.VPSMemLimitMB[role] = lim.MemLimitMB
+	}
 	st.EstimatedSec = int(r.profile.EstimatedDuration().Seconds())
 	add := func(test int, samples []Sample) {
 		for _, s := range samples {

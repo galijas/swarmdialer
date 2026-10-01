@@ -1101,13 +1101,15 @@ const STOP_REASONS = {
   swarmdialer_overloaded: 'SwarmDialer overloaded (result invalid)', cancelled: 'Cancelled', error: 'Error',
 };
 // Validated categorical palette on the dark chart surface (dataviz check:
-// all pass). Fixed order, never cycled: host, PBXware instance 1, instance 2.
+// all pass). Fixed order, never cycled: host, PBXware instance 1, instance 2,
+// SwarmDialer.
 const SERIES = [
   {key: 'host', label: 'SW host', color: ''},
   {key: 'MT', label: 'PBXware MT VPS', color: ''},
   {key: 'CC', label: 'PBXware CC VPS', color: ''},
+  {key: 'swarmdialer', label: 'SwarmDialer VPS', color: ''},
 ];
-// Series colours come from the theme (--series-1..3 in style.css), so
+// Series colours come from the theme (--series-1..4 in style.css), so
 // light and dark mode each use their own validated palette.
 const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 function applySeriesColors() { SERIES.forEach((s, i) => { s.color = cssVar(`--series-${i + 1}`); }); }
@@ -1232,17 +1234,16 @@ function toggleProfileInfo(ev) {
   pop.classList.toggle('hidden', !open);
   document.getElementById('mon-info-btn').setAttribute('aria-expanded', String(open));
 }
-// Hover shows it too; clicking elsewhere closes a pinned popover.
+function closeProfileInfo() {
+  document.getElementById('mon-info-pop').classList.add('hidden');
+  document.getElementById('mon-info-btn').setAttribute('aria-expanded', 'false');
+}
+// Opens on click only; clicking elsewhere or Escape closes it.
 document.addEventListener('DOMContentLoaded', () => {
   const wrap = document.querySelector('.info-wrap');
   if (!wrap) return;
-  let pinned = false;
-  const pop = document.getElementById('mon-info-pop');
-  const show = () => { pop.innerHTML = PROFILE_INFO[document.getElementById('mon-profile').value] || ''; pop.classList.remove('hidden'); };
-  wrap.addEventListener('mouseenter', () => { if (!pinned) show(); });
-  wrap.addEventListener('mouseleave', () => { if (!pinned) pop.classList.add('hidden'); });
-  document.getElementById('mon-info-btn').addEventListener('click', () => { pinned = !pop.classList.contains('hidden'); });
-  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) { pinned = false; pop.classList.add('hidden'); } });
+  document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) closeProfileInfo(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeProfileInfo(); });
 });
 
 function describeTest(t) {
@@ -1327,25 +1328,35 @@ function renderHero(st, p) {
   document.getElementById('hero-calls').textContent = s.concurrent_calls;
   document.getElementById('hero-target').textContent = target ? ` / ${target}` : '';
   document.getElementById('hero-calls-bar').style.width = target ? Math.min(100, 100 * s.concurrent_calls / target) + '%' : '0%';
-  const cpus = st.host_cpus || 1;
+  const cpus = st.host_cpus || 1, gb = 1024 ** 3, sd = s.swarmdialer || {};
+  // A VPS's memory in GB; the bar shows it against the VPS's memory limit
+  // (no bar when it has none).
+  const vpsMem = (role) => {
+    const used = vps[role] && vps[role].mem_bytes, lim = ((st.vps_mem_limit_mb || {})[role] || 0) * 1024 * 1024;
+    return [`${role} VPS memory`, used / gb, lim ? ` GB of ${fmt1(lim / gb)} GB` : ' GB', lim ? 100 * used / lim : null];
+  };
+  // [label, value, unit, bar fill in % (null: no bar)]
   const g = [
-    ['Host CPU', s.host.cpu_pct, '%', 100],
-    ['Host memory', s.host.mem_pct, '%', 100],
-    ['MT VPS CPU', vps.MT && vps.MT.cpu_pct / cpus, '% of host', 100],
-    ['CC VPS CPU', vps.CC && vps.CC.cpu_pct / cpus, '% of host', 100],
+    ['Host CPU', s.host.cpu_pct, '%', s.host.cpu_pct],
+    ['Host memory', s.host.mem_pct, '%', s.host.mem_pct],
+    ['MT VPS CPU', vps.MT && vps.MT.cpu_pct / cpus, '% of host', vps.MT && vps.MT.cpu_pct / cpus],
+    ['CC VPS CPU', vps.CC && vps.CC.cpu_pct / cpus, '% of host', vps.CC && vps.CC.cpu_pct / cpus],
+    vpsMem('MT'),
+    vpsMem('CC'),
     ['MT Asterisk', vps.MT && vps.MT.asterisk_cpu_pct, '% of a core', null],
     ['CC Asterisk', vps.CC && vps.CC.asterisk_cpu_pct, '% of a core', null],
-    ['SwarmDialer CPU', s.swarmdialer.cpu_pct, '%', 100],
+    ['SwarmDialer CPU', sd.cpu_pct, '% of its VPS', sd.cpu_pct],
+    ['SwarmDialer memory', sd.mem_bytes / gb, ` GB (${fmt1(sd.mem_pct)}% of its VPS)`, sd.mem_pct],
     ['Setup p95', s.setup_p95_ms, 'ms', null],
     ['Answered / failed', null, `${s.answered} / ${s.failed}`, null],
     ['Peak calls (run)', st.peak_calls, '', null],
-    ['Peak host CPU (run)', st.peak_host_cpu_pct, '%', 100],
+    ['Peak host CPU (run)', st.peak_host_cpu_pct, '%', st.peak_host_cpu_pct],
   ];
   if (s.ramdisk_est_mb) g.push(['RAM disk (est.)', s.ramdisk_est_mb, 'MB', null]);
   if (s.cps) g.push(['Dial rate', s.cps, 'calls/s', null]);
-  document.getElementById('show-gauges').innerHTML = g.map(([k, v, unit, max]) => {
+  document.getElementById('show-gauges').innerHTML = g.map(([k, v, unit, fill]) => {
     const val = v === null ? unit : `${fmt1(v)}<span class="u">${esc(unit)}</span>`;
-    const bar = max ? `<div class="meter sm"><div style="width:${Math.min(100, Math.max(0, v || 0))}%"></div></div>` : '';
+    const bar = fill !== null ? `<div class="meter sm"><div style="width:${Math.min(100, Math.max(0, fill || 0))}%"></div></div>` : '';
     return `<div class="gauge"><div class="gv">${val}</div><div class="gk">${esc(k)}</div>${bar}</div>`;
   }).join('');
 }
@@ -1361,11 +1372,13 @@ function renderCharts(st, p) {
     {...SERIES[0], v: x => x.host_cpu},
     {...SERIES[1], v: x => (x.vps_cpu.MT || 0) / cpus},
     {...SERIES[2], v: x => (x.vps_cpu.CC || 0) / cpus},
+    {...SERIES[3], v: x => (x.vps_cpu.swarmdialer || 0) / cpus},
   ], {max: 100, unit: '%'});
   drawTimeline('chart-mem', tl, [
     {...SERIES[0], v: x => (st.host_mem_bytes || 0) * x.host_mem / 100 / gb},
     {...SERIES[1], v: x => (x.vps_mem.MT || 0) / gb},
     {...SERIES[2], v: x => (x.vps_mem.CC || 0) / gb},
+    {...SERIES[3], v: x => (x.vps_mem.swarmdialer || 0) / gb},
   ], {max: st.host_mem_bytes ? st.host_mem_bytes / gb : null, unit: ' GB'});
   drawTimeline('chart-calls', tl, [{key: 'calls', label: 'Calls at once', color: SERIES[0].color, v: x => x.calls}], {max: Math.max(target, 10), unit: '', target});
 }
