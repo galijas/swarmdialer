@@ -62,7 +62,7 @@ remember missing pieces — treat it as the current best version, not final.
 >     greyed out if no second instance
 >   - both sections: increment buttons +25/+50/+100/+250/+500 to
 >     start/add calls, plus call-length config and an RTP on/off toggle
->     (silence audio if on)
+>     (speech-like audio if on)
 >   - clicking an increment button asks for confirmation, then starts
 >     that many calls
 

@@ -179,7 +179,7 @@ func (p *Phone) Register(ctx context.Context, dialDestination, sipDomain string,
 // SDP matching whatever single codec the caller's offer specified (see
 // parseSDPCodec — buildSDP never offers more than one, so this always
 // resolves unless the peer isn't SwarmDialer itself), learn the caller's
-// RTP address from their offer, and start exchanging silence-payload RTP
+// RTP address from their offer, and start exchanging RTP
 // for the call's duration.
 func (p *Phone) AutoAnswer(ctx context.Context) {
 	p.Server.OnInvite(func(req *sip.Request, tx sip.ServerTransaction) {
@@ -244,7 +244,7 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 
 // Dial places a call from this phone to calleeAOR (an extension number),
 // waits for it to be answered, and — if sendMedia is true — starts
-// exchanging silence-payload RTP with the answering party's advertised
+// exchanging RTP with the answering party's advertised
 // address (learned from their SDP answer). If sendMedia is false, the call
 // is signaling-only: full INVITE/ACK/BYE still happens (for accurate
 // call-setup load), but no RTP packets flow either direction (the SDP

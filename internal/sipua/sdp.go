@@ -11,10 +11,10 @@ import (
 // buildSDP produces a minimal single-audio-stream SDP body offering/
 // answering exactly one codec (see codec.go) on rtpPort. It doesn't
 // negotiate anything fancy — that's all SwarmDialer needs for
-// silence-payload load testing.
+// speech-like-payload load testing.
 //
 // sendMedia controls the direction attribute: true → "sendrecv" (normal
-// two-way silence RTP), false → "inactive" (signaling-only call, no media
+// two-way RTP), false → "inactive" (signaling-only call, no media
 // either direction — the standard SDP convention for this, so both a real
 // SIP stack and our own peer will honor it symmetrically, unlike e.g.
 // silently dropping the media line, which some stacks reject).

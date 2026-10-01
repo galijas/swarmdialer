@@ -63,6 +63,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=$INSTALL_ROOT
+ExecStartPre=-$INSTALL_ROOT/scripts/tune-network.sh
 ExecStart=$INSTALL_ROOT/bin/gui -addr :443 -http-redirect-addr :80 -config $INSTALL_ROOT/swarmdialer_config.json -tls-dir $INSTALL_ROOT/tls
 Restart=always
 RestartSec=2

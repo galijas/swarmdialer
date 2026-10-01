@@ -2,6 +2,7 @@ package sipua
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand/v2"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/pion/rtcp"
-	"github.com/pion/rtp"
 )
 
 const (
@@ -32,8 +32,8 @@ const (
 )
 
 // RTPSession sends and receives one audio RTP stream — real packets with
-// correct sequence numbers/timestamps, carrying silence payload in
-// whichever codec was selected — for one call leg, and exchanges RTCP
+// correct sequence numbers/timestamps, carrying speech-like audio (see
+// codecFrames) in whichever codec was selected — for one call leg, and exchanges RTCP
 // Sender/Receiver Reports alongside it so PBXware has real jitter/loss
 // data to compute a MOS score from (see docs/PROJECT_STATE.md's 2026-09-23
 // finding: without RTCP, PBXware's CDR MOS is always 0 — it has nothing to
@@ -49,14 +49,20 @@ type RTPSession struct {
 
 	codec Codec
 	spec  codecSpec
-	enc   frameEncoder
+	// frames is the shared pre-encoded audio, played in a loop from a
+	// random starting frame (framePos) so calls aren't in lockstep.
+	frames   [][]byte
+	framePos int
+	sendBuf  []byte // reused packet buffer (only the pacer touches it)
+	slot     *pacerSlot
 	// payloadType is the RTP payload type number we send with — the
 	// codec's default until SetPayloadType applies the peer's number.
 	payloadType uint8
 
 	ssrc        uint32
 	seq         uint16
-	timestamp   uint32
+	timestamp   uint32        // next packet's; only the pacer touches it
+	rtpTime     atomic.Uint32 // last sent packet's timestamp, for RTCP
 	packetsSent atomic.Uint64
 	packetsRecv atomic.Uint64
 	octetsSent  atomic.Uint64
@@ -134,12 +140,15 @@ func NewRTPSession(localPort int, codec Codec) (*RTPSession, error) {
 	}
 
 	spec := codec.spec()
+	frames := codecFrames(codec)
 	return &RTPSession{
 		conn:         conn,
 		rtcpConn:     rtcpConn,
 		codec:        codec,
 		spec:         spec,
-		enc:          spec.newEncoder(),
+		frames:       frames,
+		framePos:     rand.IntN(len(frames)),
+		sendBuf:      make([]byte, rtpHeaderLen+maxFrameLen(frames)),
 		payloadType:  spec.payloadType,
 		ssrc:         rand.Uint32(),
 		seq:          uint16(rand.Uint32()),
@@ -176,11 +185,11 @@ func (s *RTPSession) SetRemote(ip string, port int) error {
 	return nil
 }
 
-// Start begins sending a silence packet every 20ms, receiving/counting
+// Start begins sending an audio packet every 20ms, receiving/counting
 // incoming packets, and exchanging RTCP SR/RR, until ctx is canceled or
 // Stop is called.
 func (s *RTPSession) Start(ctx context.Context) {
-	go s.sendLoop(ctx)
+	mediaPacer.add(s) // sending; rtcpLoop removes it when the session ends
 	go s.recvLoop(ctx)
 	go s.rtcpLoop(ctx)
 	go s.rtcpRecvLoop(ctx)
@@ -204,47 +213,47 @@ func (s *RTPSession) Stats() (sent, recv uint64) {
 	return s.packetsSent.Load(), s.packetsRecv.Load()
 }
 
-func (s *RTPSession) sendLoop(ctx context.Context) {
-	ticker := time.NewTicker(rtpPacketDurationMs * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.stop:
-			return
-		case <-ticker.C:
-			if s.remoteAddr == nil {
-				continue // haven't learned the peer's address yet
-			}
-			payload := s.enc.EncodeSilenceFrame()
-			pkt := rtp.Packet{
-				Header: rtp.Header{
-					Version:        2,
-					PayloadType:    s.payloadType,
-					SequenceNumber: s.seq,
-					Timestamp:      s.timestamp,
-					SSRC:           s.ssrc,
-				},
-				Payload: payload,
-			}
-			s.seq++
-			s.timestamp += uint32(s.spec.samplesPerPacket)
+// rtpHeaderLen is the fixed RTP header: no CSRCs, no extension.
+const rtpHeaderLen = 12
 
-			buf, err := pkt.Marshal()
-			if err != nil {
-				continue
-			}
-			if _, err := s.conn.WriteToUDP(buf, s.remoteAddr); err == nil {
-				s.packetsSent.Add(1)
-				s.octetsSent.Add(uint64(len(payload)))
-			}
-		}
+func maxFrameLen(frames [][]byte) int {
+	m := 0
+	for _, f := range frames {
+		m = max(m, len(f))
+	}
+	return m
+}
+
+// sendPacket sends the next audio frame. The header is written directly
+// into a reused buffer: at hundreds of calls this runs tens of thousands
+// of times a second, so it avoids a per-packet allocation.
+func (s *RTPSession) sendPacket() {
+	if s.remoteAddr == nil {
+		return // haven't learned the peer's address yet
+	}
+	payload := s.frames[s.framePos]
+	s.framePos = (s.framePos + 1) % len(s.frames)
+	b := s.sendBuf[:rtpHeaderLen+len(payload)]
+	b[0] = 0x80 // version 2, no padding, no extension, no CSRCs
+	b[1] = s.payloadType & 0x7F
+	binary.BigEndian.PutUint16(b[2:], s.seq)
+	binary.BigEndian.PutUint32(b[4:], s.timestamp)
+	binary.BigEndian.PutUint32(b[8:], s.ssrc)
+	copy(b[rtpHeaderLen:], payload)
+	s.rtpTime.Store(s.timestamp)
+	s.seq++
+	s.timestamp += uint32(s.spec.samplesPerPacket)
+	if _, err := s.conn.WriteToUDP(b, s.remoteAddr); err == nil {
+		s.packetsSent.Add(1)
+		s.octetsSent.Add(uint64(len(payload)))
 	}
 }
 
 func (s *RTPSession) recvLoop(ctx context.Context) {
 	buf := make([]byte, 1500)
+	// The read deadline only lets the loop notice ctx/stop; it is moved
+	// forward when less than half of it is left, not before every packet.
+	var deadline time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -253,25 +262,31 @@ func (s *RTPSession) recvLoop(ctx context.Context) {
 			return
 		default:
 		}
-		if err := s.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
-			return
+		if now := time.Now(); deadline.Sub(now) < 500*time.Millisecond {
+			deadline = now.Add(time.Second)
+			if err := s.conn.SetReadDeadline(deadline); err != nil {
+				return
+			}
 		}
 		n, _, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			continue // timeout (checked against ctx/stop above) or closed
 		}
-		var pkt rtp.Packet
-		if err := pkt.Unmarshal(buf[:n]); err == nil {
-			s.packetsRecv.Add(1)
-			s.onRTPReceived(&pkt)
+		// Only the fixed header fields are needed (sequence number,
+		// timestamp, SSRC), so they're read in place rather than decoding
+		// the whole packet.
+		if n < rtpHeaderLen || buf[0]>>6 != 2 {
+			continue
 		}
+		s.packetsRecv.Add(1)
+		s.onRTPReceived(binary.BigEndian.Uint16(buf[2:]), binary.BigEndian.Uint32(buf[4:]), binary.BigEndian.Uint32(buf[8:]))
 	}
 }
 
 // onRTPReceived updates the RFC 3550 receive-side bookkeeping (extended
 // sequence tracking for loss, and the Appendix A.8 jitter estimator) that
 // our own outgoing RTCP Receiver Reports are built from.
-func (s *RTPSession) onRTPReceived(pkt *rtp.Packet) {
+func (s *RTPSession) onRTPReceived(seq uint16, timestamp, ssrc uint32) {
 	now := time.Now()
 	// "Arrival timestamp" expressed in the codec's own clock-rate units,
 	// relative to session start — only used as differences (in the jitter
@@ -284,27 +299,27 @@ func (s *RTPSession) onRTPReceived(pkt *rtp.Packet) {
 	st := &s.rtcpState
 	if !st.havePeerSSRC {
 		st.havePeerSSRC = true
-		st.peerSSRC = pkt.SSRC
+		st.peerSSRC = ssrc
 	}
 	if !st.haveBase {
 		st.haveBase = true
-		st.baseSeq = pkt.SequenceNumber
-		st.highestSeq = uint32(pkt.SequenceNumber)
+		st.baseSeq = seq
+		st.highestSeq = uint32(seq)
 	} else {
 		prev16 := uint16(st.highestSeq)
-		if pkt.SequenceNumber < prev16 && prev16-pkt.SequenceNumber > 0x8000 {
+		if seq < prev16 && prev16-seq > 0x8000 {
 			// Wrapped around 65536 — a genuinely later packet with a
 			// smaller 16-bit number.
 			st.cycles++
 		}
-		ext := uint32(st.cycles)<<16 | uint32(pkt.SequenceNumber)
+		ext := uint32(st.cycles)<<16 | uint32(seq)
 		if ext > st.highestSeq {
 			st.highestSeq = ext
 		}
 	}
 	st.packetsReceived++
 
-	transit := int64(arrival) - int64(pkt.Timestamp)
+	transit := int64(arrival) - int64(timestamp)
 	if st.haveLastTransit {
 		d := transit - st.lastTransit
 		if d < 0 {
@@ -352,6 +367,7 @@ func (s *RTPSession) rtcpRecvLoop(ctx context.Context) {
 }
 
 func (s *RTPSession) rtcpLoop(ctx context.Context) {
+	defer mediaPacer.remove(s) // the session has ended: stop its RTP too
 	ticker := time.NewTicker(rtcpReportInterval)
 	defer ticker.Stop()
 	for {
@@ -375,7 +391,7 @@ func (s *RTPSession) sendRTCPReport() {
 	sr := rtcp.SenderReport{
 		SSRC:        s.ssrc,
 		NTPTime:     toNTPTime(now),
-		RTPTime:     s.timestamp,
+		RTPTime:     s.rtpTime.Load(),
 		PacketCount: uint32(s.packetsSent.Load()),
 		OctetCount:  uint32(s.octetsSent.Load()),
 	}

@@ -19,6 +19,7 @@ function showTab(name) {
   document.getElementById('tab-btn-wizard').classList.toggle('active', name === 'wizard');
   document.getElementById('tab-btn-dashboard').classList.toggle('active', name === 'dashboard');
   document.getElementById('tab-btn-settings').classList.toggle('active', name === 'settings');
+  if (name !== 'dashboard') closeStatusSockets();
   if (name === 'dashboard') {
     refreshServerList();
     connectStatusSockets();
@@ -557,6 +558,14 @@ let wsReconnectTimer = null;
 const lastSeenEventSeq = new Map(); // session key -> last-shown event seq
 const graphRows = new Map(); // `${sessionKey}:${callId}` -> row element
 
+// closeStatusSockets stops the live status while the Dashboard isn't shown:
+// SwarmDialer builds every status message from all active calls (512 in a
+// benchmark), once a second, for as long as the socket is open.
+function closeStatusSockets() {
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+}
+
 function connectStatusSockets() {
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
   if (ws) { ws.onclose = null; ws.close(); }
@@ -714,8 +723,7 @@ function formatBytes(n) {
 // for a batch whose actual completion, after mosFinalizeDelay and CDR/MOS
 // lookups, ran longer than that guess, leaving the list stuck until the
 // next unrelated trigger like a tab switch). Runs for the life of the
-// page once started — same as the live-status WebSocket, cheap enough
-// not to bother stopping on tab switch.
+// page once started; cheap enough not to bother stopping on tab switch.
 let logListPollTimer = null;
 function startLogListPolling() {
   if (logListPollTimer) return;

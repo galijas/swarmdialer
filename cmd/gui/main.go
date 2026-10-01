@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+
+	"swarmdialer/internal/sipua"
 )
 
 func main() {
@@ -40,6 +42,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// Encode the calls' audio now (about a second of CPU), not during the
+	// first call that needs it.
+	go sipua.PrepareAudio()
 
 	auth, err := newAuthManager(authPath)
 	if err != nil {

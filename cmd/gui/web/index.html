@@ -146,7 +146,7 @@
     <div class="form-grid">
       <div class="form-row"><label>Server</label><select id="local-server-select" onchange="refreshRecordingStatus('local')"></select></div>
       <div class="form-row"><label>Call duration (seconds)</label><input id="local-duration" type="number" value="30"></div>
-      <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (silence audio)</label></div>
+      <div class="form-row"><label><input type="checkbox" id="local-rtp" checked> Send RTP (speech-like audio)</label></div>
       <div class="form-row"><label>Codec</label><select id="local-codec">
         <option value="ulaw" selected>G.711 (ulaw)</option>
         <option value="g722">G.722</option>
@@ -191,7 +191,7 @@
     <div class="form-grid">
       <div class="form-row"><label>Server pair</label><select id="remote-pair-select" onchange="refreshRecordingStatus('remote')"></select></div>
       <div class="form-row"><label>Call duration (seconds)</label><input id="remote-duration" type="number" value="30"></div>
-      <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (silence audio)</label></div>
+      <div class="form-row"><label><input type="checkbox" id="remote-rtp" checked> Send RTP (speech-like audio)</label></div>
       <div class="form-row"><label>Codec</label><select id="remote-codec">
         <option value="ulaw" selected>G.711 (ulaw)</option>
         <option value="g722">G.722</option>

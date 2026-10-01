@@ -76,7 +76,7 @@ const PROFILE_INFO = {
 <h4>Two limitations to know about</h4>
 <ol>
   <li>In the high-cost tests, transcoding happens on MT only. The trunk leg is ulaw, so MT converts opus ↔ ulaw and CC just forwards ulaw. Those tests load MT much more than CC. That's fine, since we measure the whole host, but the per-VPS figures will be lopsided.</li>
-  <li>The audio is silence. SwarmDialer sends silence, not speech. Codecs process a frame every 20ms regardless, but opus encodes silence more cheaply than real speech. The transcoding cost measured is therefore probably a bit lower than with real conversations. The comparison between hosts is still fair, because every host gets the same silence.</li>
+  <li>The audio is synthetic speech, not real conversations. Each call sends a 30-second loop of speech-like audio (talk spurts and pauses, about 55% talk, with a low background noise floor), so PBXware decodes, transcodes, records and converts audio shaped like one side of a conversation rather than digital silence, which codecs process more cheaply. The audio is encoded once when SwarmDialer starts and shared by every call, so SwarmDialer itself stays light, like the remote phones it stands in for. Its opus is CELT-mode at 8 kHz, while many phones and apps use opus's SILK or hybrid modes, so the transcoding cost can still differ somewhat from real devices. The comparison between hosts is fair, because every host gets exactly the same audio.</li>
 </ol>`,
 
   smoke: `
