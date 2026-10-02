@@ -452,12 +452,78 @@ func reportText(rep *report.Report, up uploadStatus) string {
 		p("Setup:    %s, codec %s -> %s, recording %s, %ds calls at up to %s calls/s", t.Mode, t.Codec.Caller, t.Codec.Callee, rec, t.CallDurationS, strconv.FormatFloat(t.DialRateCPS, 'f', -1, 64))
 		p("Time:     %s to %s", t.StartedAt.Local().Format("15:04:05"), t.FinishedAt.Local().Format("15:04:05"))
 		p("Result:   %s, max %d calls at once", res.StopReason, res.MaxConcurrentCalls)
+		if res.StopDetail != "" {
+			p("Stopped:  %s", res.StopDetail)
+		}
+		if a := res.AtStop; a != nil {
+			line := fmt.Sprintf("At stop:  %d calls, host CPU %s%%, memory %s%%, I/O wait %s%%", a.Calls, f1(a.HostCPUPct), f1(a.HostMemPct), f1(a.HostIOWaitPct))
+			for _, role := range []string{"MT", "CC"} {
+				v, ok := a.VPS[role]
+				if !ok {
+					continue
+				}
+				line += fmt.Sprintf("; %s CPU %s%% of host", role, f1(v.CPUPctOfHost))
+				if v.CPUPctOfLimit != nil {
+					line += fmt.Sprintf(" (%s%% of its limit)", f1(*v.CPUPctOfLimit))
+				}
+				if v.MemPctOfLimit != nil {
+					line += fmt.Sprintf(", memory %s%% of its limit", f1(*v.MemPctOfLimit))
+				}
+			}
+			p("%s", line)
+		}
+		if len(res.Failures) > 0 {
+			var parts []string
+			for _, f := range res.Failures {
+				part := f.Cause
+				if f.SIPCode != 0 {
+					part += fmt.Sprintf(" %d", f.SIPCode)
+				}
+				part += fmt.Sprintf(" x%d", f.Count)
+				if f.FirstAtCalls != nil {
+					part += fmt.Sprintf(" (from %d calls)", *f.FirstAtCalls)
+				}
+				parts = append(parts, part)
+			}
+			p("Failures: %s", strings.Join(parts, ", "))
+		}
 		p("Calls:    %d started, %d answered, %d failed", res.Calls.Started, res.Calls.Answered, res.Calls.Failed)
 		p("Setup ms: avg %s, p95 %s, max %s", f1(res.SetupMS.Avg), f1(res.SetupMS.P95), f1(res.SetupMS.Max))
 		p("MOS:      avg %s, min %s", f1(res.MOS.Avg), f1(res.MOS.Min))
 		p("RTP:      %s%% received", f1(res.RTPReceivedRatio*100))
 		if res.QualityDegradedAtCalls != nil {
-			p("Quality:  first dropped at %d calls", *res.QualityDegradedAtCalls)
+			why := ""
+			if res.QualityDegradedReason != "" {
+				why = " (" + res.QualityDegradedReason + ")"
+			}
+			p("Quality:  first dropped at %d calls%s", *res.QualityDegradedAtCalls, why)
+		}
+		if pv := res.PBXware; pv != nil {
+			for _, role := range []string{"MT", "CC"} {
+				var parts []string
+				for st, n := range pv.CDRStatus[role] {
+					parts = append(parts, fmt.Sprintf("%s %d", st, n))
+				}
+				sort.Strings(parts)
+				line := fmt.Sprintf("PBXware:  %s CDRs: %s", role, strings.Join(parts, ", "))
+				if peak, ok := pv.ActiveCallsPeak[role]; ok {
+					line += fmt.Sprintf("; peak %s active calls (PBXware's count)", f1(peak))
+				}
+				p("%s", line)
+			}
+		}
+		if tl := res.Tool; tl != nil {
+			line := fmt.Sprintf("Tool:     SwarmDialer CPU peak %s%%, UDP drops send %d / receive %d, extensions not registered %d -> %d",
+				f1(tl.SwarmDialerCPUPeakPct), tl.UDPSendErrors, tl.UDPReceiveErrors, tl.NotRegisteredAtStart, tl.NotRegisteredAtEnd)
+			for _, role := range []string{"MT", "CC"} {
+				if m, ok := tl.MediaReceived[role]; ok {
+					line += fmt.Sprintf("; audio from %s: %s%% lost, jitter avg %s ms", role, f1(m.LossPct), f1(m.JitterMSAvg))
+				}
+			}
+			p("%s", line)
+		}
+		if n := len(res.Events); n > 0 {
+			p("Events:   %d (see the report JSON)", n)
 		}
 		ast := res.AtTarget.AsteriskCPUPct
 		p("At load:  host CPU %s%%, host memory %s%%, Asterisk CPU MT %s%% / CC %s%% of a core", f1(res.AtTarget.HostCPUPct), f1(res.AtTarget.HostMemPct), f1(ast["MT"]), f1(ast["CC"]))

@@ -207,6 +207,30 @@ func (s *RTPSession) Stop() {
 	})
 }
 
+// MediaStats is the receive side of one RTP stream: how many packets the
+// peer's sequence numbers say were sent, how many arrived, and the
+// interarrival jitter (RFC 3550) at the end.
+type MediaStats struct {
+	Expected uint64
+	Received uint64
+	JitterMS float64
+}
+
+// MediaStats returns this session's receive statistics so far.
+func (s *RTPSession) MediaStats() MediaStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.rtcpState
+	if !st.haveBase {
+		return MediaStats{}
+	}
+	ms := MediaStats{Expected: uint64(st.highestSeq - uint32(st.baseSeq) + 1), Received: uint64(st.packetsReceived)}
+	if rate := s.spec.clockRateForSDP; rate > 0 {
+		ms.JitterMS = st.jitter * 1000 / float64(rate)
+	}
+	return ms
+}
+
 // Stats returns packet counts sent/received so far — useful for confirming
 // media is actually flowing, and for the live status dashboard.
 func (s *RTPSession) Stats() (sent, recv uint64) {
@@ -297,6 +321,12 @@ func (s *RTPSession) onRTPReceived(seq uint16, timestamp, ssrc uint32) {
 	defer s.mu.Unlock()
 
 	st := &s.rtcpState
+	if st.havePeerSSRC && ssrc != st.peerSSRC {
+		// A new source (PBXware re-bridged the media): its sequence numbers
+		// and timestamps start afresh, so the statistics do too (RFC 3550
+		// A.1 and A.8 are per source).
+		*st = rtcpReceiveState{haveLastPeerSR: st.haveLastPeerSR, lastPeerSRNTP: st.lastPeerSRNTP, lastPeerSRRecv: st.lastPeerSRRecv}
+	}
 	if !st.havePeerSSRC {
 		st.havePeerSSRC = true
 		st.peerSSRC = ssrc
@@ -319,13 +349,20 @@ func (s *RTPSession) onRTPReceived(seq uint16, timestamp, ssrc uint32) {
 	}
 	st.packetsReceived++
 
-	transit := int64(arrival) - int64(timestamp)
+	transit := int64(int32(arrival - timestamp)) // modulo 2^32, so a timestamp wrap is no jump
 	if st.haveLastTransit {
 		d := transit - st.lastTransit
 		if d < 0 {
 			d = -d
 		}
-		st.jitter += (float64(d) - st.jitter) / 16
+		// A jump of over half a second is a timestamp discontinuity (seen
+		// live: PBXware jumps the timestamps mid-call, and a 32-bit
+		// timestamp can wrap), not network jitter. Counting it pushed the
+		// estimate to minutes, which also went to PBXware in our RTCP
+		// reports and lowered its MOS.
+		if d <= int64(s.spec.clockRateForSDP/2) {
+			st.jitter += (float64(d) - st.jitter) / 16
+		}
 	}
 	st.lastTransit = transit
 	st.haveLastTransit = true

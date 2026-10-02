@@ -6,7 +6,10 @@
 // ~/claude/DTcollector_project.md for the agreed test script).
 package testrun
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Recording modes.
 const (
@@ -73,6 +76,15 @@ func rampTest(id, caller, callee, recording string) Test {
 	}
 }
 
+// rollingTarget is a rolling test's target: the calls running at once at
+// its highest rate (calls per second times call duration). It can't run
+// more, so a rolling test is measured against this rather than the
+// license's 512. Changing it doesn't change the load placed, only what
+// counts as reaching the target.
+func rollingTarget(maxCPS float64, callDuration time.Duration) int {
+	return int(math.Round(maxCPS * callDuration.Seconds()))
+}
+
 // Standard is profile "standard", version 1: the agreed script.
 // Low-cost codec: ulaw end to end (PBXware passes the audio through).
 // High-cost codec: opus from the caller, ulaw on the answering side, so
@@ -91,8 +103,9 @@ var Standard = Profile{
 		{
 			ID: "rolling_stereo", Mode: ModeRolling, CallerCodec: "ulaw", CalleeCodec: "ulaw",
 			Recording: RecordingStereo, RecordingFormat: "wav49",
-			CallDuration: time.Minute, Target: standardTarget,
-			// 8.5 calls/s of 1-minute calls is ~510 at once.
+			// 8.5 calls/s of 1-minute calls is 510 at once, the most this
+			// test can run (see rollingTarget).
+			CallDuration: time.Minute, Target: rollingTarget(8.5, time.Minute),
 			RollingCPS: []float64{2, 4, 6, 8.5}, StepDuration: 90 * time.Second,
 		},
 	},
@@ -110,7 +123,7 @@ var Smoke = Profile{
 		{ID: "ramp_stereo_high", Mode: ModeRamp, CallerCodec: "opus", CalleeCodec: "ulaw", Recording: RecordingStereo, RecordingFormat: "wav49",
 			CallDuration: 2 * time.Minute, Target: 10, DialInterval: 800 * time.Millisecond, Hold: 20 * time.Second},
 		{ID: "rolling_stereo", Mode: ModeRolling, CallerCodec: "ulaw", CalleeCodec: "ulaw", Recording: RecordingStereo, RecordingFormat: "wav49",
-			CallDuration: 20 * time.Second, Target: 20, RollingCPS: []float64{0.5, 1}, StepDuration: 30 * time.Second},
+			CallDuration: 20 * time.Second, Target: rollingTarget(1, 20*time.Second), RollingCPS: []float64{0.5, 1}, StepDuration: 30 * time.Second},
 	},
 }
 

@@ -42,6 +42,32 @@ type pool struct {
 	available       map[string]bool         // AOR -> currently free for a new call
 	dialDestination string
 	sipDomain       string
+
+	regMu           sync.Mutex
+	notRegistered   map[string]bool // AOR -> its last registration attempt failed
+	refreshFailures uint64
+}
+
+// registration reports the pool's size, how many of its extensions failed
+// their last registration attempt, and how many re-registrations failed.
+func (p *pool) registration() (total, notRegistered int, refreshFailures uint64) {
+	p.regMu.Lock()
+	defer p.regMu.Unlock()
+	for _, failed := range p.notRegistered {
+		if failed {
+			notRegistered++
+		}
+	}
+	return len(p.phones), notRegistered, p.refreshFailures
+}
+
+func (p *pool) noteRegistration(aor string, err error) {
+	p.regMu.Lock()
+	defer p.regMu.Unlock()
+	p.notRegistered[aor] = err != nil
+	if err != nil {
+		p.refreshFailures++
+	}
 }
 
 func newPool(ctx context.Context, localIP string, basePort int, registerTimeout time.Duration, dialDestination, sipDomain string, endpoints []sipua.Endpoint, progress func(registered, failed, total int)) (*pool, error) {
@@ -81,11 +107,12 @@ func newPool(ctx context.Context, localIP string, basePort int, registerTimeout 
 	const registerExpiry = 300
 	const refreshStagger = 20 * time.Millisecond
 	refreshInterval := time.Duration(float64(registerExpiry)*0.8) * time.Second
+	pl := &pool{phones: phones, available: available, dialDestination: dialDestination, sipDomain: sipDomain, notRegistered: map[string]bool{}}
 	for i, aor := range order {
-		go keepPhoneRegistered(ctx, phones[aor], dialDestination, sipDomain, registerTimeout, registerExpiry, refreshInterval+time.Duration(i)*refreshStagger)
+		go keepPhoneRegistered(ctx, pl, phones[aor], dialDestination, sipDomain, registerTimeout, registerExpiry, refreshInterval+time.Duration(i)*refreshStagger)
 	}
 
-	return &pool{phones: phones, available: available, dialDestination: dialDestination, sipDomain: sipDomain}, nil
+	return pl, nil
 }
 
 // registerPhonesStaggered registers every phone with a small stagger
@@ -144,7 +171,7 @@ func registerPhonesStaggered(ctx context.Context, timeout time.Duration, dialDes
 // keepPhoneRegistered re-registers phone every ~80% of expiry until ctx is
 // canceled, first waiting firstDelay (see newPool — staggered so many
 // phones don't all refresh in the same instant).
-func keepPhoneRegistered(ctx context.Context, phone *sipua.Phone, dialDestination, sipDomain string, registerTimeout time.Duration, expiry int, firstDelay time.Duration) {
+func keepPhoneRegistered(ctx context.Context, pl *pool, phone *sipua.Phone, dialDestination, sipDomain string, registerTimeout time.Duration, expiry int, firstDelay time.Duration) {
 	delay := firstDelay
 	for {
 		select {
@@ -155,6 +182,7 @@ func keepPhoneRegistered(ctx context.Context, phone *sipua.Phone, dialDestinatio
 		regCtx, cancel := context.WithTimeout(ctx, registerTimeout)
 		_, err := phone.Register(regCtx, dialDestination, sipDomain, expiry)
 		cancel()
+		pl.noteRegistration(phone.Endpoint.AOR, err)
 		if err != nil {
 			log.Printf("session: re-registering %s failed: %v", phone.Endpoint.AOR, err)
 		}
@@ -179,13 +207,19 @@ type activeCall struct {
 // from the live-status Event type since a log line needs much more detail
 // than the dashboard's log view does.
 type CallRecord struct {
-	CallerAOR    string
-	CalleeAOR    string
-	Codec        sipua.Codec
-	StartedAt    time.Time
-	EndedAt      time.Time
-	Answered     bool
-	FailReason   string
+	CallerAOR  string
+	CalleeAOR  string
+	Codec      sipua.Codec
+	StartedAt  time.Time
+	EndedAt    time.Time
+	Answered   bool
+	FailReason string
+	// FailCause is why the call failed (a sipua.Fail* constant), with
+	// SIPCode for a rejection.
+	FailCause string
+	SIPCode   int
+	// Dropped: answered, but PBXware hung up before the planned end.
+	Dropped      bool
 	SetupLatency time.Duration
 	RTPSent      uint64
 	RTPRecv      uint64
@@ -273,6 +307,8 @@ type Session struct {
 	totalCallsFailed   atomic.Uint64
 	totalRTPSentEnded  atomic.Uint64 // sum from calls that have already ended
 	totalRTPRecvEnded  atomic.Uint64
+
+	health health // see Health
 }
 
 // NewSession registers every endpoint as its own phone against one
@@ -283,14 +319,16 @@ func NewSession(ctx context.Context, cfg SessionConfig, endpoints []sipua.Endpoi
 	if err != nil {
 		return nil, err
 	}
-	return &Session{
+	s := &Session{
 		ctx:         ctx,
 		dialTimeout: cfg.DialTimeout,
 		callerPool:  p,
 		calleePool:  p,
 		calls:       make(map[string]*activeCall),
 		stopCh:      make(chan struct{}),
-	}, nil
+	}
+	s.watchAnsweredMedia(p)
+	return s, nil
 }
 
 // RemoteSessionConfig configures a remote (cross-server) Session.
@@ -330,7 +368,7 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 	if err != nil {
 		return nil, fmt.Errorf("setting up callee pool: %w", err)
 	}
-	return &Session{
+	s := &Session{
 		ctx:         ctx,
 		dialTimeout: cfg.DialTimeout,
 		callerPool:  callerPool,
@@ -343,7 +381,9 @@ func NewRemoteSession(ctx context.Context, cfg RemoteSessionConfig, callerEndpoi
 		},
 		calls:  make(map[string]*activeCall),
 		stopCh: make(chan struct{}),
-	}, nil
+	}
+	s.watchAnsweredMedia(calleePool)
+	return s, nil
 }
 
 // AddCalls starts up to n new calls, drawing caller extensions from the
@@ -545,12 +585,14 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	if err != nil {
 		log.Printf("session: %s -> %s (dialing %s): dial failed: %v", callerAOR, calleeAOR, dialNumber, err)
 		s.logEvent("failed", callerAOR, calleeAOR, err.Error())
+		cause, code, key := failureKey(err)
+		s.health.update(func(h *Health) { h.Failures[key]++ })
 		s.totalCallsFailed.Add(1)
 		s.release(callerAOR, calleeAOR)
 		return CallRecord{
 			CallerAOR: callerAOR, CalleeAOR: calleeAOR, Codec: codec,
 			StartedAt: startedAt, EndedAt: time.Now(),
-			Answered: false, FailReason: err.Error(), SetupLatency: setupLatency,
+			Answered: false, FailReason: err.Error(), FailCause: cause, SIPCode: code, SetupLatency: setupLatency,
 		}
 	}
 	s.totalCallsAnswered.Add(1)
@@ -562,19 +604,36 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	s.calls[id] = ac
 	s.mu.Unlock()
 
+	dropped := false
 	select {
 	case <-s.ctx.Done():
 	case <-stopCh:
 	case <-time.After(callDuration):
+	case <-call.RemoteHangup():
+		dropped = true // PBXware ended it early; the dialog is already over
 	}
 
 	sent, recv := call.RTP.Stats()
+	media := call.RTP.MediaStats()
 
-	byeCtx, byeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := call.Hangup(byeCtx); err != nil {
-		log.Printf("session: %s -> %s: hangup error: %v", callerAOR, calleeAOR, err)
+	if !dropped {
+		byeCtx, byeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := call.Hangup(byeCtx); err != nil {
+			log.Printf("session: %s -> %s: hangup error: %v", callerAOR, calleeAOR, err)
+		}
+		byeCancel()
+	} else {
+		s.logEvent("dropped", callerAOR, calleeAOR, "PBXware ended the call early")
 	}
-	byeCancel()
+	s.health.update(func(h *Health) {
+		h.CallerMedia.add(media)
+		if dropped {
+			h.Dropped++
+		}
+		if sendMedia && sent > 0 && recv == 0 {
+			h.NoAudio++
+		}
+	})
 
 	s.totalRTPSentEnded.Add(sent)
 	s.totalRTPRecvEnded.Add(recv)
@@ -587,7 +646,7 @@ func (s *Session) runCall(callerAOR, calleeAOR string, callDuration time.Duratio
 	return CallRecord{
 		CallerAOR: callerAOR, CalleeAOR: calleeAOR, Codec: codec,
 		StartedAt: startedAt, EndedAt: time.Now(),
-		Answered: true, SetupLatency: setupLatency, RTPSent: sent, RTPRecv: recv,
+		Answered: true, SetupLatency: setupLatency, RTPSent: sent, RTPRecv: recv, Dropped: dropped,
 	}
 }
 

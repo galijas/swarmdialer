@@ -56,7 +56,7 @@ const PROFILE_INFO = {
 
 <h4>Test 7: rolling stereo</h4>
 <ul>
-  <li><b>How it works:</b> stereo recording, ulaw, 1-minute calls, each replaced as soon as it ends, at 2, then 4, 6 and 8.5 new calls per second, 90 seconds per rate. At 8.5 calls per second, about 510 calls run at once.</li>
+  <li><b>How it works:</b> stereo recording, ulaw, 1-minute calls, each replaced as soon as it ends, at 2, then 4, 6 and 8.5 new calls per second, 90 seconds per rate. At 8.5 calls per second, 510 calls run at once, the most this test can run, so 510 is its target (not the license's 512).</li>
   <li><b>What it measures:</b> unlike the ramp tests, calls end continuously, so PBXware converts about 8.5 recordings to MP3 every second while also recording and setting up about 8.5 new calls per second. The key figure is the MP3 conversion delay, and whether it grows over the test, which means the host is falling behind.</li>
 </ul>
 

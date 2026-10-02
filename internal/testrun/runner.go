@@ -133,8 +133,16 @@ type Result struct {
 	QualityDegradedReason  string           `json:"quality_degraded_reason,omitempty"`
 	AtLoad                 AtLoad           `json:"at_load"`
 	Recording              *RecordingResult `json:"recording,omitempty"`
-	Samples                []Sample         `json:"samples"`
-	Error                  string           `json:"error,omitempty"`
+
+	// Diagnostics (see diagnostics.go).
+	AtStop   *AtStop      `json:"at_stop,omitempty"`
+	Failures []Failure    `json:"failures,omitempty"`
+	PBXware  *PBXwareView `json:"pbxware,omitempty"`
+	Tool     *ToolHealth  `json:"tool,omitempty"`
+	Events   []Event      `json:"events,omitempty"`
+
+	Samples []Sample `json:"samples"`
+	Error   string   `json:"error,omitempty"`
 }
 
 // Stop reasons.
@@ -384,6 +392,7 @@ type testState struct {
 	lastFailed   uint64
 	lastAnswered uint64
 	cps          float64
+	d            *diag
 }
 
 // sample takes one sample, stores it, and returns a stop reason if a
@@ -393,9 +402,11 @@ func (r *Runner) sample(st *testState, phase string) string {
 	var err error
 	if s.Host, err = r.mon.SampleHost(); err != nil {
 		r.logf("sampling host metrics: %v", err)
+		r.apiError(st, "prometheus_host")
 	}
 	if s.VPS, err = r.mon.SampleVPS(); err != nil {
 		r.logf("sampling VPS metrics: %v", err)
+		r.apiError(st, "prometheus_vps")
 	}
 	snap := st.sess.Snapshot()
 	s.ConcurrentCalls = len(snap.ActiveCalls)
@@ -423,6 +434,9 @@ func (r *Runner) sample(st *testState, phase string) string {
 	r.status.Latest = &s
 	r.mu.Unlock()
 
+	if phase != "baseline" {
+		r.diagnoseSample(st, s)
+	}
 	if phase == "baseline" || phase == "cooldown" || phase == "stopping" {
 		return ""
 	}
@@ -433,22 +447,26 @@ func (r *Runner) sample(st *testState, phase string) string {
 		n, at := s.ConcurrentCalls, s.T
 		res.Recording.RAMDiskFullEstAtCalls, res.Recording.RAMDiskFullEstAt = &n, &at
 		r.logf("recording RAM disk estimated full (%.0f of %.0f MB) at %d calls; recordings are cut off from here", s.RAMDiskEstMB, st.ramdiskMB, n)
+		r.event(st, Event{TS: st.sinceStart(s.T), Code: EvRAMDiskFull, Calls: n, Value: f64(s.RAMDiskEstMB)})
 	}
 
 	// Quality: first point where calls start failing or setup slows down.
 	newFailed, newAnswered := s.Failed-st.lastFailed, s.Answered-st.lastAnswered
 	st.lastFailed, st.lastAnswered = s.Failed, s.Answered
 	if res.QualityDegradedAtCalls == nil {
-		reason := ""
+		reason, metric, value := "", "", 0.0
 		if total := newFailed + newAnswered; total > 0 && float64(newFailed)/float64(total) > degradeFailRatio {
 			reason = fmt.Sprintf("%d of %d new calls failed", newFailed, total)
+			metric, value = "failed_pct", 100*float64(newFailed)/float64(total)
 		} else if s.SetupP95MS > degradeSetupP95MS {
 			reason = fmt.Sprintf("p95 call setup %d ms", s.SetupP95MS)
+			metric, value = "setup_p95_ms", float64(s.SetupP95MS)
 		}
 		if reason != "" {
 			n := s.ConcurrentCalls
 			res.QualityDegradedAtCalls, res.QualityDegradedReason = &n, reason
 			r.logf("call quality degraded at %d calls: %s", n, reason)
+			r.event(st, Event{TS: st.sinceStart(s.T), Code: EvQualityDegraded, Calls: n, Metric: metric, Value: f64(value)})
 		}
 	}
 
@@ -540,6 +558,8 @@ func (r *Runner) runTest(sess *orchestrator.Session, t Test) Result {
 	snap := sess.Snapshot()
 	st.lastFailed, st.lastAnswered = snap.TotalCallsFailed, snap.TotalCallsAnswered
 	startCounters := snap
+	sess.ResetMediaPeaks()
+	st.d = newDiag(sess.Health())
 
 	r.logf("%s: %s idle baseline", t.ID, r.profile.Baseline)
 	if !r.idle(st, "baseline", r.profile.Baseline) {
@@ -570,6 +590,13 @@ func (r *Runner) runTest(sess *orchestrator.Session, t Test) Result {
 		reason = r.runRolling(st, onDone, &batches)
 	}
 
+	stoppedAt := time.Now()
+	res.AtStop = r.atStop(st)
+	stopCalls := res.MaxConcurrent
+	if res.AtStop != nil {
+		stopCalls = res.AtStop.Calls
+	}
+	r.event(st, Event{TS: st.sinceStart(stoppedAt), Code: EvStop, Calls: stopCalls, Reason: reason})
 	r.setPhase("stopping")
 	r.logf("%s: stopping calls (%s)", t.ID, reason)
 	sess.Stop()
@@ -596,6 +623,7 @@ func (r *Runner) runTest(sess *orchestrator.Session, t Test) Result {
 	recMu.Lock()
 	defer recMu.Unlock()
 	r.summarize(&res, records, startCounters)
+	r.finishDiagnostics(st, callsFrom, stoppedAt)
 	var answered []orchestrator.CallRecord
 	for _, c := range records {
 		if c.Answered {
@@ -614,6 +642,7 @@ func (r *Runner) runTest(sess *orchestrator.Session, t Test) Result {
 		r.logf("%s: looking up MOS for %d calls", t.ID, len(sample))
 		if mos, err := r.env.CallMOS(sample); err != nil {
 			r.logf("%s: MOS lookup: %v", t.ID, err)
+			r.apiError(st, "pbxware_mos")
 		} else {
 			res.MOS = mos
 		}
@@ -711,7 +740,10 @@ func (r *Runner) runRolling(st *testState, onDone func([]orchestrator.CallRecord
 			}
 		}
 	}
-	if st.res.MaxConcurrent >= t.Target {
+	// Calls start and end continuously, so the number running at once
+	// moves by a call or two around the target between samples; within 1%
+	// counts as reached.
+	if st.res.MaxConcurrent >= t.Target*99/100 {
 		return StopTargetReached
 	}
 	st.res.StopDetail = fmt.Sprintf("%d of %d calls ran at once at the highest rate", st.res.MaxConcurrent, t.Target)

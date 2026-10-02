@@ -31,6 +31,9 @@ type VPSMetrics struct {
 	CPUPct         float64 `json:"cpu_pct"`
 	MemBytes       float64 `json:"mem_bytes"` // proportional resident set (shared memory split fairly)
 	AsteriskCPUPct float64 `json:"asterisk_cpu_pct"`
+	// PBXCalls is the active calls PBXware itself reports for the VPS
+	// (SERVERware's SRW exporter); nil if not available.
+	PBXCalls *float64 `json:"pbxware_active_calls,omitempty"`
 }
 
 // LocalMetrics is SwarmDialer's own load, read from the OS, so a test can
@@ -47,6 +50,10 @@ type Monitor struct {
 	sw   *serverware.Client
 	node string            // node exporter instance of the active physical node
 	vps  map[string]string // role ("MT"/"CC") -> VPS name (its Prometheus instance)
+
+	// VPSUUID maps role -> VPS UUID, for PBXware's own active call count
+	// (srw_active_calls is labelled by VPS UUID). Optional.
+	VPSUUID map[string]string
 
 	// HostCPUs (logical CPUs) and HostMemBytes describe the monitored node,
 	// so VPS figures can be shown as a share of the whole host.
@@ -148,7 +155,14 @@ func (m *Monitor) SampleVPS() (map[string]VPSMetrics, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
-		out[role] = VPSMetrics{CPUPct: vals["cpu"], MemBytes: vals["mem"], AsteriskCPUPct: vals["asterisk"]}
+		v := VPSMetrics{CPUPct: vals["cpu"], MemBytes: vals["mem"], AsteriskCPUPct: vals["asterisk"]}
+		if uuid := m.VPSUUID[role]; uuid != "" {
+			if s, err := m.sw.PromQuery(fmt.Sprintf(`sum(srw_active_calls{vps_uuid=%q})`, uuid)); err == nil && len(s) > 0 {
+				n := s[0].Value
+				v.PBXCalls = &n
+			}
+		}
+		out[role] = v
 	}
 	return out, nil
 }
@@ -235,3 +249,50 @@ func (m *Monitor) sampleLocal() LocalMetrics {
 
 // SampleLocal reads SwarmDialer's own load.
 func (m *Monitor) SampleLocal() LocalMetrics { return m.sampleLocal() }
+
+// UDPCounters are the VPS's cumulative UDP error counters (/proc/net/snmp):
+// datagrams the kernel dropped because a send or receive buffer or queue
+// was full, and receive errors.
+type UDPCounters struct {
+	SndbufErrors uint64
+	RcvbufErrors uint64
+	InErrors     uint64
+}
+
+// ReadUDPCounters reads SwarmDialer's own VPS's UDP counters.
+func ReadUDPCounters() (UDPCounters, bool) {
+	f, err := os.Open("/proc/net/snmp")
+	if err != nil {
+		return UDPCounters{}, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	var names []string
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) == 0 || fields[0] != "Udp:" {
+			continue
+		}
+		if names == nil {
+			names = fields[1:]
+			continue
+		}
+		var c UDPCounters
+		for i, v := range fields[1:] {
+			if i >= len(names) {
+				break
+			}
+			n, _ := strconv.ParseUint(v, 10, 64)
+			switch names[i] {
+			case "SndbufErrors":
+				c.SndbufErrors = n
+			case "RcvbufErrors":
+				c.RcvbufErrors = n
+			case "InErrors":
+				c.InErrors = n
+			}
+		}
+		return c, true
+	}
+	return UDPCounters{}, false
+}

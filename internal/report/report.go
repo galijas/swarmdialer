@@ -22,7 +22,7 @@ import (
 const SchemaVersion = 1
 
 // SwarmDialerVersion is this SwarmDialer's version, recorded in reports.
-const SwarmDialerVersion = "1.5.0"
+const SwarmDialerVersion = "1.6.0"
 
 type Report struct {
 	SchemaVersion      int         `json:"schema_version"`
@@ -150,15 +150,27 @@ type Codec struct {
 }
 
 type Result struct {
-	StopReason             string           `json:"stop_reason"`
+	StopReason string `json:"stop_reason"`
+	// StopDetail is what exactly met the stop condition, e.g. "MT VPS CPU
+	// 97% of its 4-core limit" (roles and numbers only).
+	StopDetail             string           `json:"stop_detail,omitempty"`
 	MaxConcurrentCalls     int              `json:"max_concurrent_calls"`
 	Calls                  Calls            `json:"calls"`
 	SetupMS                SetupMS          `json:"setup_ms"`
 	MOS                    MOS              `json:"mos"`
 	RTPReceivedRatio       float64          `json:"rtp_received_ratio"`
 	QualityDegradedAtCalls *int             `json:"quality_degraded_at_calls"`
+	QualityDegradedReason  string           `json:"quality_degraded_reason,omitempty"`
 	AtTarget               AtTarget         `json:"at_target"`
 	Recording              *RecordingResult `json:"recording,omitempty"`
+
+	// Diagnostics, added within v1 (optional). The types come from
+	// testrun: counts, codes, roles and numbers only, nothing identifying.
+	AtStop   *testrun.AtStop      `json:"at_stop,omitempty"`
+	Failures []testrun.Failure    `json:"failures,omitempty"`
+	PBXware  *testrun.PBXwareView `json:"pbxware,omitempty"`
+	Tool     *testrun.ToolHealth  `json:"tool,omitempty"`
+	Events   []testrun.Event      `json:"events,omitempty"`
 }
 
 type Calls struct {
@@ -176,6 +188,7 @@ type SetupMS struct {
 type MOS struct {
 	Avg float64 `json:"avg"`
 	Min float64 `json:"min"`
+	N   int     `json:"n"` // calls the MOS is from (up to 200 per test)
 }
 
 type AtTarget struct {
@@ -187,7 +200,20 @@ type AtTarget struct {
 type RecordingResult struct {
 	RAMDiskFullEstimatedAtCalls *int       `json:"ramdisk_full_estimated_at_calls"`
 	RAMDiskFullEstimatedAt      *time.Time `json:"ramdisk_full_estimated_at"`
-	MP3ConversionDelayS         MP3Delay   `json:"mp3_conversion_delay_s"`
+	MP3ConversionDelayS         MP3Delay   `json:"mp3_conversion_delay_s"` // the slower instance
+
+	// Per instance (MT, CC), added within v1.
+	MP3ConversionDelaySByInstance map[string]MP3DelayN `json:"mp3_conversion_delay_s_by_instance,omitempty"`
+	MissingRecordings             map[string]int       `json:"missing_recordings,omitempty"`
+}
+
+// MP3DelayN is one instance's MP3 conversion delay over N recordings.
+type MP3DelayN struct {
+	Avg   float64 `json:"avg"`
+	P95   float64 `json:"p95"`
+	Max   float64 `json:"max"`
+	N     int     `json:"n"`
+	Trend string  `json:"trend"`
 }
 
 type MP3Delay struct {
@@ -217,6 +243,9 @@ type Series struct {
 	AsteriskCPUPct   map[string][]float64 `json:"asterisk_cpu_pct"`
 	SetupMSP95       []float64            `json:"setup_ms_p95"`
 	FailedCalls      []int                `json:"failed_calls"` // calls that failed during each interval
+	// PBXwareActiveCalls is the active calls PBXware itself reported on
+	// each VPS (null where unavailable); added within v1.
+	PBXwareActiveCalls map[string][]*float64 `json:"pbxware_active_calls,omitempty"`
 }
 
 // Inputs is everything Build needs besides the run's results.
@@ -290,9 +319,16 @@ func buildTest(res testrun.Result) Test {
 			MaxConcurrentCalls:     res.MaxConcurrent,
 			Calls:                  Calls{Started: res.Calls.Started, Answered: res.Calls.Answered, Failed: res.Calls.Failed},
 			SetupMS:                SetupMS{Avg: res.SetupMS.Avg, P95: res.SetupMS.P95, Max: res.SetupMS.Max},
-			MOS:                    MOS{Avg: res.MOS.Avg, Min: res.MOS.Min},
+			MOS:                    MOS{Avg: res.MOS.Avg, Min: res.MOS.Min, N: res.MOS.N},
 			RTPReceivedRatio:       res.RTPReceivedRatio,
 			QualityDegradedAtCalls: res.QualityDegradedAtCalls,
+			QualityDegradedReason:  res.QualityDegradedReason,
+			StopDetail:             res.StopDetail,
+			AtStop:                 res.AtStop,
+			Failures:               res.Failures,
+			PBXware:                res.PBXware,
+			Tool:                   res.Tool,
+			Events:                 res.Events,
 			AtTarget: AtTarget{
 				HostCPUPct: res.AtLoad.HostCPUPct, HostMemPct: res.AtLoad.HostMemPct,
 				AsteriskCPUPct: res.AtLoad.AsteriskCPUPct,
@@ -305,6 +341,11 @@ func buildTest(res testrun.Result) Test {
 			at := rec.RAMDiskFullEstAt.UTC()
 			rr.RAMDiskFullEstimatedAt = &at
 		}
+		rr.MP3ConversionDelaySByInstance = map[string]MP3DelayN{}
+		for role, st := range rec.MP3ConversionDelayS {
+			rr.MP3ConversionDelaySByInstance[role] = MP3DelayN{Avg: st.Avg, P95: st.P95, Max: st.Max, N: st.N, Trend: rec.MP3DelayTrend[role]}
+		}
+		rr.MissingRecordings = rec.MissingRecordings
 		// One figure for both instances: the slower one.
 		for role, st := range rec.MP3ConversionDelayS {
 			rr.MP3ConversionDelayS.Avg = math.Max(rr.MP3ConversionDelayS.Avg, st.Avg)
@@ -322,6 +363,8 @@ func buildTest(res testrun.Result) Test {
 		VPSMemBytes:    map[string][]float64{"MT": {}, "CC": {}, "swarmdialer": {}},
 		AsteriskCPUPct: map[string][]float64{"MT": {}, "CC": {}},
 	}
+	pbxCalls := map[string][]*float64{"MT": {}, "CC": {}}
+	havePBXCalls := false
 	var lastFailed uint64
 	for i, s := range res.Samples {
 		ser.ConcurrentCalls = append(ser.ConcurrentCalls, s.ConcurrentCalls)
@@ -337,6 +380,8 @@ func buildTest(res testrun.Result) Test {
 			ser.VPSCPUPct[role] = append(ser.VPSCPUPct[role], round2(v.CPUPct))
 			ser.VPSMemBytes[role] = append(ser.VPSMemBytes[role], math.Round(v.MemBytes))
 			ser.AsteriskCPUPct[role] = append(ser.AsteriskCPUPct[role], round2(v.AsteriskCPUPct))
+			pbxCalls[role] = append(pbxCalls[role], v.PBXCalls)
+			havePBXCalls = havePBXCalls || v.PBXCalls != nil
 		}
 		ser.VPSCPUPct["swarmdialer"] = append(ser.VPSCPUPct["swarmdialer"], round2(s.Local.CPUCorePct))
 		ser.VPSMemBytes["swarmdialer"] = append(ser.VPSMemBytes["swarmdialer"], math.Round(s.Local.MemBytes))
@@ -347,6 +392,9 @@ func buildTest(res testrun.Result) Test {
 		}
 		lastFailed = s.Failed
 		ser.FailedCalls = append(ser.FailedCalls, failed)
+	}
+	if havePBXCalls {
+		ser.PBXwareActiveCalls = pbxCalls
 	}
 	out.Timeseries = Timeseries{IntervalS: 5, Series: ser}
 	if len(res.Samples) > 0 {

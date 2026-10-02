@@ -26,6 +26,7 @@ type Call struct {
 
 	phone  *Phone
 	callID string
+	entry  *callEntry
 }
 
 // Hangup sends BYE and stops the RTP stream together.
@@ -34,6 +35,26 @@ func (c *Call) Hangup(ctx context.Context) error {
 	c.phone.calls.Delete(c.callID)
 	return c.session.Bye(ctx)
 }
+
+// RemoteHangup is closed when the other side (PBXware) ends the call with
+// a BYE before this side hangs up. The RTP stream is already stopped
+// then, and Hangup isn't needed (the dialog has ended).
+func (c *Call) RemoteHangup() <-chan struct{} { return c.entry.ended }
+
+// callEntry is one active call on a phone, found by Call-ID when a BYE
+// arrives.
+type callEntry struct {
+	rtp       *RTPSession
+	ended     chan struct{}
+	endedOnce sync.Once
+	answered  bool // this phone answered the call (it's the callee leg)
+}
+
+func newCallEntry(rtp *RTPSession, answered bool) *callEntry {
+	return &callEntry{rtp: rtp, ended: make(chan struct{}), answered: answered}
+}
+
+func (e *callEntry) end() { e.endedOnce.Do(func() { close(e.ended) }) }
 
 // Phone is one simulated PBXware extension: it can register, place outbound
 // calls, and auto-answer inbound calls, all bound to one local UDP port (its
@@ -53,7 +74,11 @@ type Phone struct {
 	// with when the offer includes it — see SetPreferredCodec.
 	preferredCodec atomic.Value
 
-	// calls maps Call-ID -> *RTPSession for calls currently active on this
+	// onAnsweredEnd, if set, receives the media statistics of each call
+	// this phone answered, when the call ends (see SetOnAnsweredCallEnd).
+	onAnsweredEnd atomic.Value // func(MediaStats)
+
+	// calls maps Call-ID -> *callEntry for calls currently active on this
 	// phone, so the OnBye handler (which only sees a *sip.Request, not our
 	// Call struct) can stop the right RTP stream when the other party hangs
 	// up. Keyed by plain Call-ID rather than sipgo's computed dialog ID to
@@ -139,7 +164,12 @@ func NewPhone(ctx context.Context, localIP string, localPort int, ep Endpoint) (
 		// matched — the other party hanging up ends our media too.
 		if callID := req.CallID(); callID != nil {
 			if v, ok := p.calls.LoadAndDelete(callID.Value()); ok {
-				v.(*RTPSession).Stop()
+				e := v.(*callEntry)
+				e.rtp.Stop()
+				e.end()
+				if f, ok := p.onAnsweredEnd.Load().(func(MediaStats)); ok && f != nil && e.answered {
+					f(e.rtp.MediaStats())
+				}
 			}
 		}
 	})
@@ -153,6 +183,10 @@ func NewPhone(ctx context.Context, localIP string, localPort int, ep Endpoint) (
 
 	return p, nil
 }
+
+// SetOnAnsweredCallEnd sets a function that receives the media statistics
+// of each call this phone answers, when PBXware ends it.
+func (p *Phone) SetOnAnsweredCallEnd(f func(MediaStats)) { p.onAnsweredEnd.Store(f) }
 
 // SetPreferredCodec sets the codec this phone answers its next call with
 // when the offer includes it, instead of the offer's first codec. Set by
@@ -240,7 +274,7 @@ func (p *Phone) AutoAnswer(ctx context.Context) {
 		}
 
 		if callID := req.CallID(); callID != nil {
-			p.calls.Store(callID.Value(), rtpSession)
+			p.calls.Store(callID.Value(), newCallEntry(rtpSession, true))
 		}
 		if sendMedia {
 			rtpSession.Start(ctx)
@@ -304,7 +338,7 @@ func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestina
 	sess, err := p.DialogClient.WriteInvite(handshakeCtx, req)
 	if err != nil {
 		rtpSession.Stop()
-		return nil, fmt.Errorf("sending invite: %w", err)
+		return nil, &DialError{Cause: FailSetupError, Err: fmt.Errorf("sending invite: %w", err)}
 	}
 
 	if err := sess.WaitAnswer(handshakeCtx, sipgo.AnswerOptions{
@@ -312,22 +346,22 @@ func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestina
 		Password: p.Endpoint.Password,
 	}); err != nil {
 		rtpSession.Stop()
-		return nil, fmt.Errorf("waiting for answer: %w", err)
+		return nil, classifyAnswerError(err, sess.InviteResponse)
 	}
 
 	if err := sess.Ack(handshakeCtx); err != nil {
 		rtpSession.Stop()
-		return nil, fmt.Errorf("sending ack: %w", err)
+		return nil, &DialError{Cause: FailSetupError, Err: fmt.Errorf("sending ack: %w", err)}
 	}
 
 	remoteIP, remotePort, err := parseSDPMedia(sess.InviteResponse.Body())
 	if err != nil {
 		rtpSession.Stop()
-		return nil, fmt.Errorf("parsing callee's SDP answer: %w", err)
+		return nil, &DialError{Cause: FailSetupError, Err: fmt.Errorf("parsing callee's SDP answer: %w", err)}
 	}
 	if err := rtpSession.SetRemote(remoteIP, remotePort); err != nil {
 		rtpSession.Stop()
-		return nil, fmt.Errorf("setting RTP remote: %w", err)
+		return nil, &DialError{Cause: FailSetupError, Err: fmt.Errorf("setting RTP remote: %w", err)}
 	}
 	// Send using the payload type number the answer declared for our
 	// codec — an SDP's numbers say what that side expects to receive
@@ -340,7 +374,8 @@ func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestina
 	}
 
 	callID := req.CallID().Value()
-	p.calls.Store(callID, rtpSession)
+	entry := newCallEntry(rtpSession, false)
+	p.calls.Store(callID, entry)
 
-	return &Call{session: sess, RTP: rtpSession, phone: p, callID: callID}, nil
+	return &Call{session: sess, RTP: rtpSession, phone: p, callID: callID, entry: entry}, nil
 }

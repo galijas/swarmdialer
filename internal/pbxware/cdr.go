@@ -292,6 +292,9 @@ type RecordingCDR struct {
 	StartUnix int64
 	Duration  int  // seconds
 	Available bool // true once PBXware has finished the recording file (MP3)
+	// Status is the call's outcome as PBXware recorded it (e.g. "Answered",
+	// "Not Answered", "Busy", "Failed"); "" if the column is missing.
+	Status string
 }
 
 // RecordingCDRsSince returns the CDRs of calls that started at or after
@@ -339,6 +342,7 @@ func (c *Client) RecordingCDRsSince(serverID int, since time.Time) ([]RecordingC
 		iStart, ok2 := col["Date/Time"]
 		iDur, ok3 := col["Total Duration"]
 		iAvail, ok4 := col["Recording Available"]
+		iStatus, hasStatus := col["Status"]
 		if !(ok1 && ok2 && ok3 && ok4) {
 			return nil, fmt.Errorf("CDR response is missing expected columns (header: %v)", body["header"])
 		}
@@ -355,10 +359,14 @@ func (c *Client) RecordingCDRsSince(serverID int, since time.Time) ([]RecordingC
 				continue
 			}
 			dur, _ := strconv.Atoi(str(iDur))
-			out = append(out, RecordingCDR{
+			c := RecordingCDR{
 				UniqueID: str(iID), StartUnix: start, Duration: dur,
 				Available: strings.EqualFold(str(iAvail), "true"),
-			})
+			}
+			if hasStatus && iStatus < len(row) {
+				c.Status = str(iStatus)
+			}
+			out = append(out, c)
 		}
 		if next, _ := body["next_page"].(bool); !next || reachedOlder {
 			break

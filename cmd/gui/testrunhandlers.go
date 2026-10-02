@@ -376,5 +376,9 @@ func (a *app) gatherEnvironment(profile testrun.Profile) (*environment, error) {
 		return nil, &httpError{http.StatusBadGateway, err}
 	}
 	in.Node = mon.Node()
+	mon.VPSUUID = map[string]string{}
+	for role, srv := range map[string]*store.Server{"MT": mt, "CC": cc} {
+		mon.VPSUUID[role] = swCfg.PBXwareVPS[srv.ID].UUID
+	}
 	return &environment{in: in, mon: mon, limits: limits, mt: mt, cc: cc}, nil
 }
