@@ -116,19 +116,3 @@ cd /root/swarmdialer
 ./bin/gui -reset-password -config /root/swarmdialer/swarmdialer_config.json
 systemctl restart swarmdialer
 ```
-
-**The trunk or DID step of the wizard fails because they already exist.**
-An earlier SwarmDialer that was connected to the same PBXware instances,
-and wasn't reset (Settings -> Reset Instances), leaves its trunks
-(`SwarmDialer-to-<instance name>`), tenant, extensions and DIDs behind.
-Delete them in PBXware, then run the step again.
-
-**"Trunk name contains invalid characters".** PBXware only allows letters,
-digits, `-`, `_` and `.` in trunk names, and SwarmDialer names each trunk
-after the other instance's display name. SwarmDialer replaces other
-characters with `-` (e.g. `MT Test` becomes `SwarmDialer-to-MT-Test`), so
-this only appears on versions before 1.6; update, or rename the instance
-in Settings -> PBXware Instances.
-
-**The GUI looks outdated after an update.** Reload the page with Ctrl+F5
-so the browser doesn't use its cached copy.
