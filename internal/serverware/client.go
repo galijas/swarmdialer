@@ -199,20 +199,46 @@ func (c *Client) GetVPS(id int) (VPS, error) {
 
 // EnableCollectMetrics turns on per-VPS metrics collection ("Collect
 // Metrics" in the Edit VPS form) and waits for SERVERware to finish
-// applying it. It uses the documented Edit VPS call, which replaces the
-// whole VPS record: the current record is read and sent back with only
-// collect_metrics changed, and root_password empty (which leaves the
-// password unchanged, as the GUI does). Confirmed live 2026-09-28 on an
-// LXC PBXware VPS: only collect_metrics changed and the VPS kept running.
+// applying it. Confirmed live 2026-09-28 on an LXC PBXware VPS: only
+// collect_metrics changed and the VPS kept running.
 func (c *Client) EnableCollectMetrics(id int, wait time.Duration) error {
+	return c.editVPS(id, wait, func(rec map[string]any) bool {
+		if on, _ := rec["collect_metrics"].(bool); on {
+			return false
+		}
+		rec["collect_metrics"] = true
+		return true
+	}, func(v VPS) bool { return v.CollectMetrics })
+}
+
+// SetCallrecRAM sets a PBXware VPS's call recording RAM disk size
+// ("callrec_ram_mb", in MB) and waits for SERVERware to apply it to the
+// record. The running VPS keeps its old RAM disk until it is restarted
+// (the container's tmpfs is created at start).
+func (c *Client) SetCallrecRAM(id, mb int, wait time.Duration) error {
+	return c.editVPS(id, wait, func(rec map[string]any) bool {
+		if cur, _ := rec["callrec_ram_mb"].(float64); int(cur) == mb {
+			return false
+		}
+		rec["callrec_ram_mb"] = mb
+		return true
+	}, func(v VPS) bool { return v.CallrecRAMMB == mb })
+}
+
+// editVPS changes a VPS through the documented Edit VPS call, which
+// replaces the whole record: the current record is read, change edits it
+// (returning false if nothing needs changing), and it is sent back with
+// root_password empty (which leaves the password unchanged, as the GUI
+// does). It then waits for SERVERware's background task to finish and
+// applied to report true.
+func (c *Client) editVPS(id int, wait time.Duration, change func(map[string]any) bool, applied func(VPS) bool) error {
 	var rec map[string]any
 	if err := c.call(http.MethodGet, fmt.Sprintf("/api/networks/1/vpses/%d", id), nil, &rec); err != nil {
 		return fmt.Errorf("reading VPS %d: %w", id, err)
 	}
-	if on, _ := rec["collect_metrics"].(bool); on {
+	if !change(rec) {
 		return nil
 	}
-	rec["collect_metrics"] = true
 	rec["root_password"] = ""
 	if _, err := c.do(http.MethodPut, fmt.Sprintf("/api/networks/1/vpses/%d", id), rec); err != nil {
 		return fmt.Errorf("editing VPS %d: %w", id, err)
@@ -220,16 +246,50 @@ func (c *Client) EnableCollectMetrics(id int, wait time.Duration) error {
 	deadline := time.Now().Add(wait)
 	for {
 		v, err := c.GetVPS(id)
-		if err == nil && v.Task == "" && v.CollectMetrics {
+		if err == nil && v.Task == "" && applied(v) {
 			return nil
 		}
 		if time.Now().After(deadline) {
 			if err != nil {
-				return fmt.Errorf("waiting for VPS %d to apply collect_metrics: %w", id, err)
+				return fmt.Errorf("waiting for VPS %d to apply the change: %w", id, err)
 			}
-			return fmt.Errorf("VPS %d still hasn't applied collect_metrics after %s (task %q)", id, wait, v.Task)
+			return fmt.Errorf("VPS %d still hasn't applied the change after %s (task %q)", id, wait, v.Task)
 		}
 		time.Sleep(2 * time.Second)
+	}
+}
+
+// RestartVPS restarts a VPS and waits until it is running again (state
+// RUNNING with no task in progress), up to wait. SERVERware runs the
+// restart as a background task; the call itself returns 202 at once.
+func (c *Client) RestartVPS(id int, wait time.Duration) error {
+	if _, err := c.do(http.MethodPost, fmt.Sprintf("/api/networks/1/vpses/%d/restart", id), map[string]any{"daemonize": true}); err != nil {
+		return fmt.Errorf("restarting VPS %d: %w", id, err)
+	}
+	// First see the restart begin (a task, or a state other than
+	// RUNNING), so a VPS that still shows RUNNING from before the restart
+	// isn't taken as already back. A restart quicker than the polling
+	// interval may never show that, so after a minute it's assumed done.
+	deadline := time.Now().Add(wait)
+	started := false
+	startBy := time.Now().Add(time.Minute)
+	for {
+		time.Sleep(2 * time.Second)
+		v, err := c.GetVPS(id)
+		if err == nil {
+			busy := v.Task != "" || v.State != "RUNNING"
+			if busy {
+				started = true
+			} else if started || time.Now().After(startBy) {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("waiting for VPS %d to restart: %w", id, err)
+			}
+			return fmt.Errorf("VPS %d isn't running again after %s (state %s, task %q)", id, wait, v.State, v.Task)
+		}
 	}
 }
 

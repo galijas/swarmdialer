@@ -5,6 +5,9 @@ let wizardState = {
   server1: null, // {id, edition, ...} once provisioned
   server2: null,
   addingSecond: false,
+  // Notices to raise a VPS's recording RAM disk by hand: shown only if
+  // SERVERware is skipped (connecting it raises the RAM disk itself).
+  ramdiskNotices: [],
 };
 
 // ---------- Tabs ----------
@@ -155,6 +158,7 @@ async function provision(step) {
       if (p.done) {
         statusEl.textContent = `Done — ${p.created} extensions created.`;
         if (p.warning) addWizardNotice(p.warning);
+        if (p.ramdisk_notice) wizardState.ramdiskNotices.push(p.ramdisk_notice);
         // Left disabled — this step is done and showStep moved us past it.
         if (step === 1) {
           wizardState.server1 = req;
@@ -216,23 +220,17 @@ async function connectServerware() {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(req),
     });
     poll(() => api('/api/wizard/serverware/status?job_id=' + job_id), 2000, (p) => {
-      stepsEl.innerHTML = '';
-      (p.steps || []).forEach(t => {
-        const li = document.createElement('li');
-        li.textContent = '✓ ' + t;
-        stepsEl.appendChild(li);
-      });
-      (p.warnings || []).forEach(t => {
-        const li = document.createElement('li');
-        li.className = 'warn';
-        li.textContent = '⚠ ' + t;
-        stepsEl.appendChild(li);
-      });
+      renderSwSteps(p, []);
       statusEl.textContent = p.message ? p.message + '...' : '';
       if (p.error) { retry(p.error); return true; }
       if (p.done) {
         statusEl.textContent = 'SERVERware connected.';
-        document.getElementById('sw-complete-btn').classList.remove('hidden');
+        // SERVERware now handles the recording RAM disk, so the manual
+        // notices from provisioning no longer apply.
+        wizardState.ramdiskNotices = [];
+        const restart = p.restart_needed || [];
+        if (restart.length) offerRamdiskRestart(restart, p);
+        else document.getElementById('sw-complete-btn').classList.remove('hidden');
         return true;
       }
       return false;
@@ -240,6 +238,83 @@ async function connectServerware() {
   } catch (e) {
     retry(e.message);
   }
+}
+
+// renderSwSteps lists a SERVERware job's completed steps and warnings,
+// after the lines in before (the connect job's, during a restart job).
+function renderSwSteps(p, before) {
+  const stepsEl = document.getElementById('sw-steps');
+  stepsEl.innerHTML = '';
+  const add = (cls, text) => {
+    const li = document.createElement('li');
+    if (cls) li.className = cls;
+    li.textContent = text;
+    stepsEl.appendChild(li);
+  };
+  before.forEach(l => add(l.cls, l.text));
+  (p.steps || []).forEach(t => add('', '✓ ' + t));
+  (p.warnings || []).forEach(t => add('warn', '⚠ ' + t));
+}
+
+// offerRamdiskRestart asks whether to restart the PBXware VPSs whose
+// recording RAM disk was just raised, so it takes effect. Yes restarts
+// them one at a time, waiting for each PBXware to come back up; Cancel
+// leaves it to the user.
+function offerRamdiskRestart(restart, connected) {
+  const statusEl = document.getElementById('sw-status');
+  const done = () => document.getElementById('sw-complete-btn').classList.remove('hidden');
+  const list = restart.map(r => `${r.name} (VPS ${r.vps_name})`).join(' and ');
+  const manual = `Restart ${list} in SERVERware before running calls with stereo recording: until then the recording RAM disk stays at its old size, which stereo recordings fill within minutes.`;
+  const ok = confirm(`The call recording RAM disk of ${list} was raised to 512 MB in SERVERware. It takes effect only after the VPS restarts.\n\n` +
+    `Restart now? SwarmDialer restarts one VPS at a time and waits until PBXware is back up before the next. Calls on that instance are dropped while it restarts.`);
+  if (!ok) {
+    statusEl.textContent = 'SERVERware connected. ' + manual;
+    statusEl.className = 'status-line error';
+    addWizardNotice(manual);
+    done();
+    return;
+  }
+  const before = [
+    ...(connected.steps || []).map(t => ({cls: '', text: '✓ ' + t})),
+    ...(connected.warnings || []).map(t => ({cls: 'warn', text: '⚠ ' + t})),
+  ];
+  statusEl.className = 'status-line';
+  statusEl.textContent = 'Starting the restart...';
+  api('/api/serverware/restart-pbxware', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({server_ids: restart.map(r => r.server_id)}),
+  }).then(({job_id}) => {
+    poll(() => api('/api/wizard/serverware/status?job_id=' + job_id), 3000, (p) => {
+      renderSwSteps(p, before);
+      statusEl.textContent = p.message ? p.message + '...' : '';
+      if (p.error) {
+        statusEl.textContent = 'Restart failed: ' + p.error + '. ' + manual;
+        statusEl.className = 'status-line error';
+        addWizardNotice(manual);
+        done();
+        return true;
+      }
+      if (p.done) {
+        statusEl.textContent = 'SERVERware connected, and the recording RAM disks are active.';
+        done();
+        return true;
+      }
+      return false;
+    });
+  }).catch(e => {
+    statusEl.textContent = 'Restart failed: ' + e.message + '. ' + manual;
+    statusEl.className = 'status-line error';
+    addWizardNotice(manual);
+    done();
+  });
+}
+
+// skipServerware finishes the wizard without SERVERware. The recording
+// RAM disk then can't be raised automatically, so any notices from
+// provisioning are shown first.
+function skipServerware() {
+  if (wizardState.ramdiskNotices.length) alert(wizardState.ramdiskNotices.join('\n\n'));
+  finishWizard();
 }
 
 async function prefillDTURL() {

@@ -45,7 +45,16 @@ some KVM properties can only change while the VPS is stopped.
 `callrec_ram_mb` on a PBXware VPS is the call recording RAM disk size
 provided to the container (the PBXware setting does not resize it on an
 LXC VPS; the container's mount comes from SERVERware). Editable through
-the same PUT. Not changed by SwarmDialer yet.
+the same PUT; the new size applies when the VPS next starts.
+
+Since 2026-10-02, connecting SERVERware raises it to 512 MB on LXC
+PBXware VPSs below that, and the wizard offers to restart them with
+`POST /api/networks/1/vpses/{id}/restart` (documented; body
+`{"daemonize": true}`, returns 202 and runs as a background task). After
+the restart SwarmDialer waits for state `RUNNING` with no task, then for
+PBXware's API and Asterisk (a SIP OPTIONS answer). **Not yet confirmed
+live:** the PUT of `callrec_ram_mb` on a running VPS, and the VPS
+state/task values during a restart.
 
 ## Prometheus (on the controller)
 

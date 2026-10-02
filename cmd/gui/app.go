@@ -124,6 +124,7 @@ func (a *app) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/wizard/connect/status", a.handleConnectStatus)
 	mux.HandleFunc("/api/wizard/serverware", a.handleServerwareConnect)
 	mux.HandleFunc("/api/wizard/serverware/status", a.handleServerwareStatus)
+	mux.HandleFunc("/api/serverware/restart-pbxware", a.handleServerwareRestart)
 	mux.HandleFunc("/api/serverware", a.handleServerware)
 	mux.HandleFunc("/api/dtcollector", a.handleDTCollector)
 	mux.HandleFunc("/api/testrun/start", a.handleTestRunStart)

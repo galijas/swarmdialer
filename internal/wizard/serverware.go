@@ -22,6 +22,18 @@ type ServerwareProgress struct {
 	warnings []string
 	done     bool
 	err      string
+	// restart lists the PBXware VPSs whose recording RAM disk was raised
+	// and that need a restart for it to take effect.
+	restart []RAMDiskRestart
+}
+
+// RAMDiskRestart is a PBXware VPS whose recording RAM disk was raised in
+// SERVERware and that needs a restart for it to take effect.
+type RAMDiskRestart struct {
+	ServerID string `json:"server_id"`
+	Name     string `json:"name"`     // the PBXware instance's name
+	VPSName  string `json:"vps_name"` // its VPS in SERVERware
+	FromMB   int    `json:"from_mb"`
 }
 
 func (p *ServerwareProgress) set(mutate func()) {
@@ -54,6 +66,9 @@ type ServerwareProgressSnapshot struct {
 	Warnings []string `json:"warnings,omitempty"`
 	Done     bool     `json:"done"`
 	Err      string   `json:"error,omitempty"`
+	// RestartNeeded is set when connecting raised a RAM disk (see
+	// RAMDiskRestart); the GUI then offers to restart those VPSs.
+	RestartNeeded []RAMDiskRestart `json:"restart_needed,omitempty"`
 }
 
 // Snapshot returns a copy safe to read or serialize without locking.
@@ -62,7 +77,7 @@ func (p *ServerwareProgress) Snapshot() ServerwareProgressSnapshot {
 	defer p.mu.Unlock()
 	return ServerwareProgressSnapshot{
 		Steps: slices.Clone(p.steps), Message: p.message, Warnings: slices.Clone(p.warnings),
-		Done: p.done, Err: p.err,
+		Done: p.done, Err: p.err, RestartNeeded: slices.Clone(p.restart),
 	}
 }
 
@@ -90,8 +105,10 @@ const (
 // site: checks the API key, finds the VPSs of SwarmDialer and the PBXware
 // instances by IP, checks they all run on the same host (the test
 // measures one host's hardware, so all three must share it), turns on
-// observability and per-VPS metrics for the PBXware VPSs, and waits until
-// Prometheus is collecting them. SwarmDialer's own VPS is left alone: it
+// observability and per-VPS metrics for the PBXware VPSs, waits until
+// Prometheus is collecting them, and raises the PBXware VPSs' call
+// recording RAM disk to ramDiskSizeMB (those needing a restart for it are
+// listed in the progress, see RAMDiskRestart). SwarmDialer's own VPS is left alone: it
 // can be KVM, where SERVERware only applies some edits while the VPS is
 // stopped, and SwarmDialer measures its own load directly instead.
 func ConnectServerware(p ServerwareParams, progress *ServerwareProgress) (*store.Serverware, error) {
@@ -216,6 +233,37 @@ func ConnectServerware(p ServerwareParams, progress *ServerwareProgress) (*store
 			return fail(fmt.Errorf("Collect Metrics is on for %s, but %w", name, err))
 		}
 		progress.completed(fmt.Sprintf("collecting metrics for %s", name))
+	}
+
+	// Call recording RAM disk: on SERVERware, the PBXware VPS's tmpfs comes
+	// from the VPS's callrec_ram_mb, not from PBXware's own setting (which
+	// provisioning already set), and is created when the VPS starts.
+	for _, f := range pbx {
+		name := f.vps.Name
+		if f.vps.Engine != "lxc" {
+			progress.set(func() {
+				progress.warnings = append(progress.warnings, fmt.Sprintf("%s is a %s VPS, so its recording RAM disk wasn't checked (only LXC was tested); make sure it is at least %d MB for stereo recording", name, f.vps.Engine, ramDiskSizeMB))
+			})
+			continue
+		}
+		v, err := sw.GetVPS(f.vps.ID)
+		if err != nil {
+			return fail(fmt.Errorf("reading %s: %w", name, err))
+		}
+		if v.CallrecRAMMB >= ramDiskSizeMB {
+			progress.completed(fmt.Sprintf("recording RAM disk of %s is %d MB", name, v.CallrecRAMMB))
+			continue
+		}
+		progress.step(fmt.Sprintf("raising the recording RAM disk of %s to %d MB", name, ramDiskSizeMB))
+		if err := sw.SetCallrecRAM(f.vps.ID, ramDiskSizeMB, collectMetricsApplyWait); err != nil {
+			return fail(fmt.Errorf("raising the recording RAM disk of %s: %w", name, err))
+		}
+		from, srv := v.CallrecRAMMB, f.srv
+		progress.set(func() {
+			progress.steps = append(progress.steps, fmt.Sprintf("raised the recording RAM disk of %s from %d to %d MB (takes effect after a VPS restart)", name, from, ramDiskSizeMB))
+			progress.message = ""
+			progress.restart = append(progress.restart, RAMDiskRestart{ServerID: srv.ID, Name: srv.Name, VPSName: name, FromMB: from})
+		})
 	}
 
 	cfg := &store.Serverware{

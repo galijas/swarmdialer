@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"swarmdialer/internal/dtcollector"
+	"swarmdialer/internal/serverware"
 	"swarmdialer/internal/store"
 	"swarmdialer/internal/wizard"
 )
@@ -83,6 +84,56 @@ func (a *app) handleServerwareStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, progress.Snapshot())
+}
+
+// handleServerwareRestart restarts PBXware instances' VPSs through
+// SERVERware, one at a time, waiting for each PBXware to come back up (to
+// apply a recording RAM disk raised while connecting SERVERware). Body:
+// {"server_ids": [...]}. Progress is read like the connect job's.
+func (a *app) handleServerwareRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ServerIDs []string `json:"server_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if a.testRunning() {
+		writeError(w, http.StatusConflict, errors.New("a test run is in progress; restart the VPSs after it finishes"))
+		return
+	}
+	sw := a.store.Serverware()
+	if sw == nil {
+		writeError(w, http.StatusBadRequest, errors.New("connect SERVERware first"))
+		return
+	}
+	var targets []wizard.RestartTarget
+	for _, id := range req.ServerIDs {
+		srv := a.store.GetServer(id)
+		ref, ok := sw.PBXwareVPS[id]
+		if srv == nil || !ok {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("unknown PBXware instance %q; reconnect SERVERware", id))
+			return
+		}
+		targets = append(targets, wizard.RestartTarget{Server: srv, VPS: ref})
+	}
+	if len(targets) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("no instances to restart"))
+		return
+	}
+
+	progress := &wizard.ServerwareProgress{}
+	jobID := a.newJobID()
+	a.mu.Lock()
+	a.serverwareJobs[jobID] = progress
+	a.mu.Unlock()
+	client := serverware.NewClient(sw.ControllerURL, sw.APIKey)
+	go func() { _ = wizard.RestartPBXware(client, targets, progress) }()
+	writeJSON(w, http.StatusOK, map[string]string{"job_id": jobID})
 }
 
 // handleServerware reports the saved SERVERware connection, without any

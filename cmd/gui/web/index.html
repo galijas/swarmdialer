@@ -112,7 +112,7 @@
   <!-- Step 7: SERVERware site (host monitoring) + DT Collector -->
   <div class="panel hidden" id="step-serverware">
     <h2>Step 7: Connect SERVERware</h2>
-    <p class="status-line">Connects the SERVERware site that SwarmDialer and both PBXware instances run on, so the test script can monitor the host. All three VPSs must be on the same host. SwarmDialer turns on Observability and Collect Metrics for the PBXware VPSs.</p>
+    <p class="status-line">Connects the SERVERware site that SwarmDialer and both PBXware instances run on, so the test script can monitor the host. All three VPSs must be on the same host. SwarmDialer turns on Observability and Collect Metrics for the PBXware VPSs, and raises their call recording RAM disk to 512 MB (offering to restart them so it takes effect).</p>
     <div class="form-grid">
       <div class="form-row"><label for="sw-controller">SERVERware controller IP or URL</label><input id="sw-controller" placeholder="10.1.101.10"></div>
       <div class="form-row"><label for="sw-key">SERVERware admin API key</label><input id="sw-key" type="password" autocomplete="off"></div>
@@ -121,7 +121,7 @@
     </div>
     <div class="increment-row">
       <button class="btn" id="sw-connect-btn" onclick="connectServerware()">Connect SERVERware</button>
-      <button class="btn secondary" id="sw-skip-btn" onclick="finishWizard()">Skip for now</button>
+      <button class="btn secondary" id="sw-skip-btn" onclick="skipServerware()">Skip for now</button>
     </div>
     <ul class="sw-steps" id="sw-steps"></ul>
     <div class="status-line" id="sw-status"></div>

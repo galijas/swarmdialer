@@ -76,6 +76,11 @@ type ProvisionProgress struct {
 	done    bool
 	err     string
 	warning string // non-fatal: shown to the user once provisioning is done
+	// ramDiskNotice tells the user to raise the VPS's recording RAM disk
+	// in SERVERware by hand. The GUI holds it back and shows it only if
+	// SERVERware isn't connected, since connecting SERVERware raises it
+	// automatically (see ConnectServerware).
+	ramDiskNotice string
 }
 
 func (p *ProvisionProgress) set(mutate func()) {
@@ -89,19 +94,20 @@ func (p *ProvisionProgress) set(mutate func()) {
 // ProvisionProgress itself), since that struct embeds a sync.Mutex and
 // copying it is a real bug (caught by `go vet`'s copylocks check).
 type ProvisionProgressSnapshot struct {
-	Total   int    `json:"total"`
-	Created int    `json:"created"`
-	Message string `json:"message"`
-	Done    bool   `json:"done"`
-	Err     string `json:"error,omitempty"`
-	Warning string `json:"warning,omitempty"`
+	Total         int    `json:"total"`
+	Created       int    `json:"created"`
+	Message       string `json:"message"`
+	Done          bool   `json:"done"`
+	Err           string `json:"error,omitempty"`
+	Warning       string `json:"warning,omitempty"`
+	RAMDiskNotice string `json:"ramdisk_notice,omitempty"`
 }
 
 // Snapshot returns a copy safe to read or serialize without locking.
 func (p *ProvisionProgress) Snapshot() ProvisionProgressSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return ProvisionProgressSnapshot{Total: p.total, Created: p.created, Message: p.message, Done: p.done, Err: p.err, Warning: p.warning}
+	return ProvisionProgressSnapshot{Total: p.total, Created: p.created, Message: p.message, Done: p.done, Err: p.err, Warning: p.warning, RAMDiskNotice: p.ramDiskNotice}
 }
 
 // ProvisionParams configures one server's provisioning step.
@@ -197,11 +203,13 @@ func Provision(ctx context.Context, p ProvisionParams, progress *ProvisionProgre
 	// container's config on the SERVERware host, so the size set above
 	// doesn't change it (confirmed live 2026-09-26: still 64MB after a
 	// PBXware restart; 512MB only after raising it in SERVERware and
-	// restarting the VPS). There's no API for either, so tell the user —
-	// only when this run actually changed the setting.
+	// restarting the VPS). Connecting SERVERware does both through its API
+	// (ConnectServerware, RestartPBXware); without it, the user has to, so
+	// the GUI shows this notice if SERVERware isn't connected — only when
+	// this run actually changed the setting.
 	if before.CallRecordings.UseRAMDisk != "yes" || before.CallRecordings.RAMDiskSize != ramDiskSizeMB {
 		progress.set(func() {
-			progress.warning = fmt.Sprintf("Call recording RAM disk on %s was set to %dMB in PBXware, but the actual RAM disk is provided by SERVERware. "+
+			progress.ramDiskNotice = fmt.Sprintf("Call recording RAM disk on %s was set to %dMB in PBXware, but the actual RAM disk is provided by SERVERware. "+
 				"Increase this VPS's recording RAM disk size to %dMB in SERVERware, then restart the VPS. Until then it stays at its old size (typically 64MB), "+
 				"which large or stereo recording batches can fill.", p.Name, ramDiskSizeMB, ramDiskSizeMB)
 		})
