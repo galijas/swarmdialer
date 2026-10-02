@@ -3,12 +3,12 @@
 SwarmDialer is an internal load-testing tool for PBXware. It provisions
 tenants and extensions directly through PBXware's HTTP API, then places up
 to hundreds of simultaneous real SIP calls (full INVITE/ACK/BYE signaling,
-with real RTP media) between them to see how a PBXware instance behaves
-under concurrent call load. Everything is driven from a web GUI: a Setup
-Wizard walks you through connecting to one or two PBXware instances and
-provisioning test extensions, and a Dashboard lets you ramp up local and
-cross-server call volume on demand while watching a live log and call
-graph of what's happening.
+with real RTP media carrying speech-like audio) between them to see how a
+PBXware instance behaves under concurrent call load. Everything is driven
+from a web GUI: a Setup Wizard walks you through connecting to one or two
+PBXware instances and provisioning test extensions, and a Dashboard lets
+you ramp up local and cross-server call volume on demand while watching a
+live log and call graph of what's happening.
 
 It's built to be deployed fresh wherever it's needed, not tied to any
 one environment - the wizard collects all connection details (API keys,
@@ -45,13 +45,8 @@ optionally have it delete the resources it created later.
    ```
 
 3. **Save the admin password** the install script prints at the end
-   (username `admin`). It's shown only once and stored as a hash. To
-   create a new one later:
-
-   ```
-   ./bin/gui -reset-password -config /root/swarmdialer/swarmdialer_config.json
-   systemctl restart swarmdialer
-   ```
+   (username `admin`). It's shown only once and stored as a hash. If it's
+   lost, see [Troubleshooting](#troubleshooting).
 
 4. **Open `https://<server-ip>/`** in a browser (plain `http://`
    redirects there) and log in. The certificate is self-signed, so the
@@ -68,7 +63,11 @@ The **SW Host Benchmark** tab runs a fixed, versioned test script
 PBXware instances, while monitoring the SERVERware host and the PBXware
 VPSs through SERVERware's Prometheus. SwarmDialer and both PBXware VPSs
 must run on the same SERVERware host; the wizard checks this and turns on
-SERVERware observability and per-VPS metrics itself.
+SERVERware observability and per-VPS metrics itself. It also raises each
+PBXware VPS's call recording RAM disk to 512 MB in SERVERware and offers
+to restart the VPSs so it takes effect (one at a time, waiting until
+PBXware is back up). If the SERVERware step is skipped, the wizard instead
+tells you to raise the RAM disk and restart the VPSs manually.
 
 When a run completes, a report (hardware details and results only, no IPs,
 host names or secrets) is saved under `reports/` and uploaded to DT
@@ -97,5 +96,39 @@ readable only by root, and is specific to this deployment - nothing here
 is meant to be copied between environments. Set `-config <path>` to
 change where it's stored. The admin password hash
 (`swarmdialer_auth.json`) and the TLS certificate (`tls/`) live next to
-it. After a test is finished and uploaded, the Monitoring tab offers
+it. After a test is finished and uploaded, the SW Host Benchmark tab offers
 "Finish and wipe", which deletes the configuration and every stored key.
+
+## Troubleshooting
+
+**Check that the service is running, and read its log:**
+
+```
+systemctl status swarmdialer
+journalctl -u swarmdialer -f
+```
+
+**Reset the admin password.** This prints a new random password for
+`admin`; restart the service to apply it:
+
+```
+cd /root/swarmdialer
+./bin/gui -reset-password -config /root/swarmdialer/swarmdialer_config.json
+systemctl restart swarmdialer
+```
+
+**The trunk or DID step of the wizard fails because they already exist.**
+An earlier SwarmDialer that was connected to the same PBXware instances,
+and wasn't reset (Settings -> Reset Instances), leaves its trunks
+(`SwarmDialer-to-<instance name>`), tenant, extensions and DIDs behind.
+Delete them in PBXware, then run the step again.
+
+**"Trunk name contains invalid characters".** PBXware only allows letters,
+digits, `-`, `_` and `.` in trunk names, and SwarmDialer names each trunk
+after the other instance's display name. SwarmDialer replaces other
+characters with `-` (e.g. `MT Test` becomes `SwarmDialer-to-MT-Test`), so
+this only appears on versions before 1.6; update, or rename the instance
+in Settings -> PBXware Instances.
+
+**The GUI looks outdated after an update.** Reload the page with Ctrl+F5
+so the browser doesn't use its cached copy.
