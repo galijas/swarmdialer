@@ -65,6 +65,9 @@ type Sample struct {
 	SetupP95MS      int64   `json:"setup_p95_ms"` // calls answered in the last 30s
 	RAMDiskEstMB    float64 `json:"ramdisk_est_mb,omitempty"`
 	CPS             float64 `json:"cps,omitempty"` // rolling: current dial rate
+	// UDPSendDrops is how many outgoing datagrams SwarmDialer's VPS dropped
+	// (send queue full) since the previous sample.
+	UDPSendDrops uint64 `json:"udp_send_drops"`
 }
 
 // Stats is a small summary of a set of values.
@@ -399,6 +402,12 @@ type testState struct {
 // saturation condition is met ("" otherwise).
 func (r *Runner) sample(st *testState, phase string) string {
 	s := Sample{T: time.Now(), Phase: phase, Local: r.mon.SampleLocal(), CPS: st.cps}
+	if u, ok := ReadUDPCounters(); ok && st.d != nil && st.d.udpOK {
+		if u.SndbufErrors >= st.d.udpPrev.SndbufErrors {
+			s.UDPSendDrops = u.SndbufErrors - st.d.udpPrev.SndbufErrors
+		}
+		st.d.udpPrev = u
+	}
 	var err error
 	if s.Host, err = r.mon.SampleHost(); err != nil {
 		r.logf("sampling host metrics: %v", err)
@@ -592,6 +601,8 @@ func (r *Runner) runTest(sess *orchestrator.Session, t Test) Result {
 
 	stoppedAt := time.Now()
 	res.AtStop = r.atStop(st)
+	h := sess.Health()
+	st.d.atStop = &h
 	stopCalls := res.MaxConcurrent
 	if res.AtStop != nil {
 		stopCalls = res.AtStop.Calls

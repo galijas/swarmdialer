@@ -22,7 +22,7 @@ import (
 const SchemaVersion = 1
 
 // SwarmDialerVersion is this SwarmDialer's version, recorded in reports.
-const SwarmDialerVersion = "1.6.0"
+const SwarmDialerVersion = "1.6.2"
 
 type Report struct {
 	SchemaVersion      int         `json:"schema_version"`
@@ -246,6 +246,9 @@ type Series struct {
 	// PBXwareActiveCalls is the active calls PBXware itself reported on
 	// each VPS (null where unavailable); added within v1.
 	PBXwareActiveCalls map[string][]*float64 `json:"pbxware_active_calls,omitempty"`
+	// SwarmDialerUDPSendDrops is how many outgoing packets SwarmDialer's
+	// VPS dropped in each interval (send queue full); added within v1.
+	SwarmDialerUDPSendDrops []int `json:"swarmdialer_udp_send_drops,omitempty"`
 }
 
 // Inputs is everything Build needs besides the run's results.
@@ -386,6 +389,7 @@ func buildTest(res testrun.Result) Test {
 		ser.VPSCPUPct["swarmdialer"] = append(ser.VPSCPUPct["swarmdialer"], round2(s.Local.CPUCorePct))
 		ser.VPSMemBytes["swarmdialer"] = append(ser.VPSMemBytes["swarmdialer"], math.Round(s.Local.MemBytes))
 		ser.SetupMSP95 = append(ser.SetupMSP95, float64(s.SetupP95MS))
+		ser.SwarmDialerUDPSendDrops = append(ser.SwarmDialerUDPSendDrops, int(s.UDPSendDrops))
 		failed := 0
 		if i > 0 && s.Failed >= lastFailed {
 			failed = int(s.Failed - lastFailed)

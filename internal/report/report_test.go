@@ -30,7 +30,7 @@ func TestBuildTestDiagnostics(t *testing.T) {
 			MP3DelayTrend:       map[string]string{"MT": "stable"},
 			MissingRecordings:   map[string]int{"MT": 1},
 		},
-		Samples: []testrun.Sample{{Phase: "ramp", VPS: map[string]testrun.VPSMetrics{"MT": {PBXCalls: &n}, "CC": {}}}},
+		Samples: []testrun.Sample{{Phase: "ramp", UDPSendDrops: 1200, VPS: map[string]testrun.VPSMetrics{"MT": {PBXCalls: &n}, "CC": {}}}},
 	}
 	raw, err := json.Marshal(buildTest(res))
 	if err != nil {
@@ -50,6 +50,7 @@ func TestBuildTestDiagnostics(t *testing.T) {
 		`"mp3_conversion_delay_s_by_instance":{"MT":{"avg":3,"p95":0,"max":0,"n":9,"trend":"stable"}}`,
 		`"missing_recordings":{"MT":1}`,
 		`"pbxware_active_calls":{"CC":[null],"MT":[431]}`,
+		`"swarmdialer_udp_send_drops":[1200]`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in\n%s", want, out)

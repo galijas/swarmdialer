@@ -262,9 +262,12 @@ type SessionSnapshot struct {
 	TotalCallsStarted   uint64     `json:"total_calls_started"`
 	TotalCallsAnswered  uint64     `json:"total_calls_answered"`
 	TotalCallsFailed    uint64     `json:"total_calls_failed"`
-	TotalRTPSent        uint64     `json:"total_rtp_sent"` // cumulative, includes ended calls
-	TotalRTPRecv        uint64     `json:"total_rtp_recv"`
-	RecentEvents        []Event    `json:"recent_events"` // last maxRecentEvents lifecycle events, oldest first
+	// TotalCallsCancelled counts calls that were queued but never dialed
+	// (Stop, or the session ending, came first).
+	TotalCallsCancelled uint64  `json:"total_calls_cancelled"`
+	TotalRTPSent        uint64  `json:"total_rtp_sent"` // cumulative, includes ended calls
+	TotalRTPRecv        uint64  `json:"total_rtp_recv"`
+	RecentEvents        []Event `json:"recent_events"` // last maxRecentEvents lifecycle events, oldest first
 }
 
 // Session is a persistent pool of registered, auto-answering extensions
@@ -300,13 +303,14 @@ type Session struct {
 	// mid-batch can't race a goroutine reading the field.
 	stopCh chan struct{}
 
-	nextEventSeq       atomic.Uint64
-	nextCallID         atomic.Uint64
-	totalCallsStarted  atomic.Uint64
-	totalCallsAnswered atomic.Uint64
-	totalCallsFailed   atomic.Uint64
-	totalRTPSentEnded  atomic.Uint64 // sum from calls that have already ended
-	totalRTPRecvEnded  atomic.Uint64
+	nextEventSeq        atomic.Uint64
+	nextCallID          atomic.Uint64
+	totalCallsStarted   atomic.Uint64
+	totalCallsAnswered  atomic.Uint64
+	totalCallsFailed    atomic.Uint64
+	totalCallsCancelled atomic.Uint64
+	totalRTPSentEnded   atomic.Uint64 // sum from calls that have already ended
+	totalRTPRecvEnded   atomic.Uint64
 
 	health health // see Health
 }
@@ -433,12 +437,12 @@ func (s *Session) AddCallsWithCallee(n int, callDuration, rampInterval time.Dura
 			case <-time.After(time.Duration(i) * rampInterval):
 			case <-s.ctx.Done():
 				s.release(caller, callee)
-				s.totalCallsFailed.Add(1)
+				s.totalCallsCancelled.Add(1) // never dialed, so not a failure
 				batchFailed.Add(1)
 				return
 			case <-stopCh:
 				s.release(caller, callee)
-				s.totalCallsFailed.Add(1)
+				s.totalCallsCancelled.Add(1)
 				batchFailed.Add(1)
 				return
 			}
@@ -689,6 +693,7 @@ func (s *Session) Snapshot() SessionSnapshot {
 		TotalCallsStarted:   s.totalCallsStarted.Load(),
 		TotalCallsAnswered:  s.totalCallsAnswered.Load(),
 		TotalCallsFailed:    s.totalCallsFailed.Load(),
+		TotalCallsCancelled: s.totalCallsCancelled.Load(),
 		TotalRTPSent:        s.totalRTPSentEnded.Load() + liveSent,
 		TotalRTPRecv:        s.totalRTPRecvEnded.Load() + liveRecv,
 		RecentEvents:        events,

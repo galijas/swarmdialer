@@ -341,12 +341,14 @@ func (p *Phone) Dial(ctx context.Context, dialTimeout time.Duration, dialDestina
 		return nil, &DialError{Cause: FailSetupError, Err: fmt.Errorf("sending invite: %w", err)}
 	}
 
+	var sawResponse atomic.Bool // any response to the INVITE (100, 180, an auth challenge...) before the end
 	if err := sess.WaitAnswer(handshakeCtx, sipgo.AnswerOptions{
-		Username: p.Endpoint.Username,
-		Password: p.Endpoint.Password,
+		Username:   p.Endpoint.Username,
+		Password:   p.Endpoint.Password,
+		OnResponse: func(*sip.Response) error { sawResponse.Store(true); return nil },
 	}); err != nil {
 		rtpSession.Stop()
-		return nil, classifyAnswerError(err, sess.InviteResponse)
+		return nil, classifyAnswerError(err, handshakeCtx.Err() != nil, sawResponse.Load())
 	}
 
 	if err := sess.Ack(handshakeCtx); err != nil {

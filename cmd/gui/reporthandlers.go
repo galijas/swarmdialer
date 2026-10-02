@@ -513,8 +513,8 @@ func reportText(rep *report.Report, up uploadStatus) string {
 			}
 		}
 		if tl := res.Tool; tl != nil {
-			line := fmt.Sprintf("Tool:     SwarmDialer CPU peak %s%%, UDP drops send %d / receive %d, extensions not registered %d -> %d",
-				f1(tl.SwarmDialerCPUPeakPct), tl.UDPSendErrors, tl.UDPReceiveErrors, tl.NotRegisteredAtStart, tl.NotRegisteredAtEnd)
+			line := fmt.Sprintf("Tool:     SwarmDialer CPU peak %s%%, UDP drops send %d (%s%%) / receive %d, extensions not registered %d -> %d",
+				f1(tl.SwarmDialerCPUPeakPct), tl.UDPSendErrors, f1(tl.UDPSendDropPct), tl.UDPReceiveErrors, tl.NotRegisteredAtStart, tl.NotRegisteredAtEnd)
 			for _, role := range []string{"MT", "CC"} {
 				if m, ok := tl.MediaReceived[role]; ok {
 					line += fmt.Sprintf("; audio from %s: %s%% lost, jitter avg %s ms", role, f1(m.LossPct), f1(m.JitterMSAvg))

@@ -49,6 +49,10 @@ type Failure struct {
 	Cause   string `json:"cause"`
 	SIPCode int    `json:"sip_code,omitempty"` // rejected: PBXware's response code
 	Count   int    `json:"count"`
+	// AfterStop is how many of Count failed after the test stopped
+	// placing calls: calls still being set up at the stop (included in
+	// Count). A cause seen only after the stop has no FirstAt*.
+	AfterStop int `json:"after_stop,omitempty"`
 	// When this cause first appeared (to the 5-second sample): calls
 	// running at once, and seconds since the test started.
 	FirstAtCalls *int `json:"first_at_calls,omitempty"`
@@ -74,6 +78,9 @@ type ToolHealth struct {
 	// SwarmDialer read it).
 	UDPSendErrors    uint64 `json:"udp_send_errors"`
 	UDPReceiveErrors uint64 `json:"udp_receive_errors"`
+	// UDPSendDropPct is UDPSendErrors as % of everything SwarmDialer's VPS
+	// tried to send during the test.
+	UDPSendDropPct float64 `json:"udp_send_drop_pct"`
 	// The test's extensions: how many failed their last registration at
 	// the start and end, and failed re-registrations during the test.
 	Extensions             int    `json:"extensions"`
@@ -119,6 +126,7 @@ const (
 	EvRegistrationLost = "registration_lost" // more extensions failed to re-register
 	EvAPIError         = "api_error"         // reading Prometheus, CDRs or MOS failed (Reason: the source)
 	EvStop             = "stop"              // the test stopped placing calls (Reason)
+	EvSendDrops        = "udp_send_drops"    // SwarmDialer's VPS started dropping outgoing packets (Count: in that 5-second sample)
 )
 
 const maxEvents = 100
@@ -130,8 +138,11 @@ const nearFraction = 0.8
 type diag struct {
 	start        orchestrator.Health
 	prev         orchestrator.Health
+	atStop       *orchestrator.Health // set when the test stops placing calls
 	udpStart     UDPCounters
+	udpPrev      UDPCounters
 	udpOK        bool
+	dropsSeen    bool
 	near         map[string]bool
 	apiErrSeen   map[string]bool
 	firstFailure map[string][2]int // failure key -> calls, seconds
@@ -140,6 +151,7 @@ type diag struct {
 func newDiag(h orchestrator.Health) *diag {
 	d := &diag{start: h, prev: h, near: map[string]bool{}, apiErrSeen: map[string]bool{}, firstFailure: map[string][2]int{}}
 	d.udpStart, d.udpOK = ReadUDPCounters()
+	d.udpPrev = d.udpStart
 	return d
 }
 
@@ -193,8 +205,18 @@ func (r *Runner) diagnoseSample(st *testState, s Sample) {
 		}
 	}
 	near("swarmdialer_cpu", "swarmdialer_cpu", "", s.Local.CPUPct, swarmDialerMaxPct)
+	if s.UDPSendDrops > 0 && !st.d.dropsSeen {
+		st.d.dropsSeen = true
+		r.event(st, Event{TS: at, Code: EvSendDrops, Calls: s.ConcurrentCalls, Count: int(s.UDPSendDrops), Metric: "host_cpu", Value: f64(s.Host.CPUPct)})
+	}
 
 	h := st.sess.Health()
+	if st.d.atStop != nil {
+		// After the stop: failures from calls still being set up are
+		// counted as after_stop, not as where failures began.
+		st.d.prev = h
+		return
+	}
 	for key, n := range h.Failures {
 		if n > st.d.start.Failures[key] && st.d.prev.Failures[key] <= st.d.start.Failures[key] {
 			st.d.firstFailure[key] = [2]int{s.ConcurrentCalls, at}
@@ -272,12 +294,16 @@ func (r *Runner) finishDiagnostics(st *testState, callsFrom, stoppedAt time.Time
 	end := st.sess.Health()
 
 	// Failures by cause, largest first.
-	add := func(key string, n uint64) {
+	stopH := end
+	if st.d.atStop != nil {
+		stopH = *st.d.atStop
+	}
+	add := func(key string, n, afterStop uint64) {
 		if n == 0 {
 			return
 		}
 		cause, code := splitFailureKey(key)
-		f := Failure{Cause: cause, SIPCode: code, Count: int(n)}
+		f := Failure{Cause: cause, SIPCode: code, Count: int(n), AfterStop: int(afterStop)}
 		if ff, ok := st.d.firstFailure[key]; ok {
 			calls, at := ff[0], ff[1]
 			f.FirstAtCalls, f.FirstAtS = &calls, &at
@@ -285,10 +311,10 @@ func (r *Runner) finishDiagnostics(st *testState, callsFrom, stoppedAt time.Time
 		res.Failures = append(res.Failures, f)
 	}
 	for key, n := range end.Failures {
-		add(key, n-st.d.start.Failures[key])
+		add(key, n-st.d.start.Failures[key], n-stopH.Failures[key])
 	}
-	add("dropped", end.Dropped-st.d.start.Dropped)
-	add("no_audio", end.NoAudio-st.d.start.NoAudio)
+	add("dropped", end.Dropped-st.d.start.Dropped, end.Dropped-stopH.Dropped)
+	add("no_audio", end.NoAudio-st.d.start.NoAudio, end.NoAudio-stopH.NoAudio)
 	sort.Slice(res.Failures, func(i, j int) bool { return res.Failures[i].Count > res.Failures[j].Count })
 
 	// Tool health.
@@ -306,6 +332,12 @@ func (r *Runner) finishDiagnostics(st *testState, callsFrom, stoppedAt time.Time
 		if u, ok := ReadUDPCounters(); ok {
 			th.UDPSendErrors = u.SndbufErrors - st.d.udpStart.SndbufErrors
 			th.UDPReceiveErrors = (u.RcvbufErrors + u.InErrors) - (st.d.udpStart.RcvbufErrors + st.d.udpStart.InErrors)
+			// The kernel counts a datagram dropped at the send queue as a
+			// send error and not in OutDatagrams, so all that was attempted
+			// is the two together.
+			if tried := u.OutDatagrams - st.d.udpStart.OutDatagrams + th.UDPSendErrors; tried > 0 {
+				th.UDPSendDropPct = round2(100 * float64(th.UDPSendErrors) / float64(tried))
+			}
 		}
 	}
 	for role, pair := range map[string][2]orchestrator.MediaTotals{

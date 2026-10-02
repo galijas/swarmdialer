@@ -254,6 +254,7 @@ func (m *Monitor) SampleLocal() LocalMetrics { return m.sampleLocal() }
 // datagrams the kernel dropped because a send or receive buffer or queue
 // was full, and receive errors.
 type UDPCounters struct {
+	OutDatagrams uint64
 	SndbufErrors uint64
 	RcvbufErrors uint64
 	InErrors     uint64
@@ -284,6 +285,8 @@ func ReadUDPCounters() (UDPCounters, bool) {
 			}
 			n, _ := strconv.ParseUint(v, 10, 64)
 			switch names[i] {
+			case "OutDatagrams":
+				c.OutDatagrams = n
 			case "SndbufErrors":
 				c.SndbufErrors = n
 			case "RcvbufErrors":
