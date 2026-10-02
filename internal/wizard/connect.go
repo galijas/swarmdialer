@@ -91,7 +91,7 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	bHost := hostOnly(b.SIPHost)
 
 	trunkA, err := clientA.AddTrunk(pbxware.TrunkParams{
-		Server: 1, Name: "SwarmDialer-to-" + b.Name, ProviderID: providerIDA,
+		Server: 1, Name: trunkName(b.Name), ProviderID: providerIDA,
 		Host: aHost, Username: userA, Secret: credA,
 		PeerHost: bHost, PeerSecret: credB,
 		Country: "869", National: "1", International: "011",
@@ -102,7 +102,7 @@ func ConnectServers(a, b *store.Server, progress *ConnectProgress) error {
 	}
 
 	trunkB, err := clientB.AddTrunk(pbxware.TrunkParams{
-		Server: 1, Name: "SwarmDialer-to-" + a.Name, ProviderID: providerIDB,
+		Server: 1, Name: trunkName(a.Name), ProviderID: providerIDB,
 		Host: bHost, Username: userB, Secret: credB,
 		PeerHost: aHost, PeerSecret: credA,
 		Country: "869", National: "1", International: "011",
@@ -212,6 +212,29 @@ func hostOnly(sipHost string) string {
 		}
 	}
 	return sipHost
+}
+
+// trunkName names the trunk to a peer instance after the peer's name.
+// PBXware only accepts [a-zA-Z0-9-_.] in trunk names, while instance
+// names are free text from the wizard (e.g. "MT Test"), so every other
+// character becomes "-" (runs of them collapse into one).
+func trunkName(peer string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range peer {
+		if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			b.WriteRune(r)
+			dash = false
+		} else if !dash {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	name := strings.Trim(b.String(), "-")
+	if name == "" {
+		name = "peer"
+	}
+	return "SwarmDialer-to-" + name
 }
 
 // trunkUsername derives a trunk auth username from a server ID. PBXware 8.2
